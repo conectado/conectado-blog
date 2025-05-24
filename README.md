@@ -25,8 +25,8 @@ Currently working on networking infrastructure and VPN technology. When I encoun
 
 ## Get in Touch
 
-- GitHub: [@your-username](https://github.com/conectado)
-- Email: gabrielalejandro7@gmail.com`
+- GitHub: [@conectado](https://github.com/conectado)
+- Email: gabrielalejandro7@gmail.com
 
 ---
 
