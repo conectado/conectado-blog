@@ -1,4 +1,3 @@
-
 ---
 slug: ebpf-firewall-post
 title: How We Built an eBPF-based General Purpose Packet Filter
