@@ -16,7 +16,7 @@ Currently working on networking infrastructure and VPN technology. When I encoun
 
 ## Topics I Write About
 
-- **Systems Programming** - Rust, C, kernel development
+- **Systems Programming** - Rust!
 - **Networking** - Packet processing, firewalls, VPNs
 - **Performance** - Optimization, profiling, benchmarking
 - **Security** - Network security, access control
