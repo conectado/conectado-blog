@@ -4,8 +4,7 @@ Welcome to my technical blog! I write about systems programming, networking, and
 
 ## Latest Articles
 
-### 🔥 (WIP)[Building a Custom Firewall with eBPF and Rust](https://github.com/conectado/Blog/blob/main/posts/2025-05-23/ebpf-firewall/README.md)
-*December 2024*
+### [You don't need `async`]()
 
 ---
 
