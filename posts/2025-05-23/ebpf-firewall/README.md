@@ -3,6 +3,7 @@ slug: ebpf-firewall-post
 title: How We Built an eBPF-based General Purpose Packet Filter
 authors: [conectado]
 tags: [ebpf, firewall, rust, aya]
+draft: true
 ---
 
 ## Introduction
