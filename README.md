@@ -26,7 +26,7 @@ Currently working on networking infrastructure and VPN technology. When I encoun
 
 - GitHub: [@conectado](https://github.com/conectado)
 - Email: gabrielalejandro7@gmail.com
-
+- [Resume](https://github.com/conectado/Blog/blob/main/resume.md)
 ---
 
 *📝 All articles are written in Markdown and hosted directly on GitHub. Feel free to open issues for questions, corrections, or suggestions!*
