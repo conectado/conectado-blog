@@ -10,6 +10,8 @@ date: 2025-06-08
 
 In Rust, we normally use `async` functions to express concurrency. A function that's marked as `async` is a function which can be paused and resumed at a later time when an event signals that's ready to continue.
 
+<!-- I usually prefer the word `suspended` over paused. I think that is what is typically used in the context of co-routines.  -->
+
 There's a lot written on how this works[^1][^2], so I'll not dive into this.
 
 [^1]: https://doc.rust-lang.org/stable/book/ch17-00-async-await.html
@@ -19,7 +21,11 @@ However, most runtimes provide functions on how to compose these futures in a wa
 
 A lot of the time this isn't needed, especially when I/O is involved there's little to gain in parallel execution, what you want is to await an event and continue working on other futures. But this still requires using primitives such as Mutexes due to async runtimes being designed for potential parallelism.
 
+<!-- I know what you are getting at but with my naive-reader hat on, I'd ask: What about channels? Those allow me to communicate between different futures without Mutexes. -->
+
 So here I'll lay out what I call the `Poll`-style future which can save you a lot of pain when dealing with single-threaded concurrent execution.
+
+<!-- You are already hinting at it but I think what should be made clear here is that the problem only exists when you have shared, _mutable_ state. Due to how Rust lowers `async` functions, the mutable lifetimes are longer than necessary and thus disallow composing multiple futures that all need a mutable borrow. -->
 
 ## An `async` problem
 
@@ -186,6 +192,8 @@ use tokio::time::{Duration, Interval};
 // This future manages the state and both events
 // We use `Interval` instead of `sleep` to simplify the code so we don't have to recreate the sleep each iteration
 // but this can be easily swapped back.
+//
+// I'd suggest to just use `Interval`s in both cases then, makes it easier to follow for people.
 struct FutureThatCountsEvents {
     // The state
     counter: u64,
@@ -253,7 +261,7 @@ This is way clearer! On one side, no `Mutex`. And it's also very clear when the 
 
 Here we use `Interval` instead of `Sleep` to simplify the code - since sleep futures complete after one use, we'd need to recreate them each iteration. The core polling pattern remains identical.
 
-There's still room for bugs, for example if you forget to `loop`, you won't register the waker within `cx` again to be woken up at a later time. And the future will forever sleep 😔. So be careful with that, always make sure that if you return `Pending` you've registered some waker; In most cases it just means always calling at least one other `poll` function that also returns pending.
+There's still room for bugs, for example if you forget to `loop`, you won't register the waker within `cx` again to be woken up at a later time. And the future will sleep forever 😔. So be careful with that, always make sure that if you return `Pending` you've registered some waker; In most cases it just means always calling at least one other `poll` function that also returns pending.
 
 But this can also be made simpler, for starters, the `Pin` does look weird...
 
@@ -341,4 +349,17 @@ It shows how it can be used for managing state in complex applications without d
 
 For single-threaded concurrent operations, with shared state, this might be a better approach. Reduced overhead, easy-to-reason-about, generally cleaner. But when you need parallel execution or there's no need for shared state, this might not be the best approach, there are plenty of pitfalls when writing the polling loops that one needs to be careful about. 
 
-But it's another weapon in your arsenal which should be considered. So next time you are reaching for `Arc<Mutex<T>>` in async code, consider if it could instead be written in `Poll`-style.
+But it's another tool in your arsenal which should be considered. So next time you are reaching for `Arc<Mutex<T>>` in async code, consider if it could instead be written in `Poll`-style.
+
+<!-- I was never a fan of the term "poll-style". All futures are poll-style, the difference is whether you write them yourself or the compiler does it for you. I think "hand-rolled" futures might be a better term?
+
+In general, I think you might want to come up with a more complex example. Many problems can be solved with Rust's built-in `async` lowering. Even if you have shared state between them, they can often be modelled as multiple streams of events that all get "merged". In your case, you could merge both intervals into a single stream, poll / await that and then update the state on each event. That way, you'd also have a single owner of the state again and Rust will happy compile it.
+
+My latest thinking here is that you need hand-rolled async code in Rust if you have more complex state machines where multiple async sources need to update some state. Essentially, you have two choices then:
+
+1. You lean into `async/await` and split up the state such that there are different owners, depending on when it needs to be updated. This has the advantage that the `async` code itself feels more natural because you can lean into using `async` to compose code that is conceptually linear but needs to suspend on IO.
+2. You are ignorant about the fact, when and where IO happens and write all of you logic sans-IO. This has the downside that you need to re-implement some of the state machines that using `async fn` would give you for free.
+
+I am not sure what of the above you want to incorporate into the blog article. It doesn't quite hit the nail on the head as to why you would use this. I _think_ the crux of the problem is the interplay of restrictive mutable borrows and how the `async fn` desugaring works. So perhaps what you need to show is that a more complex `async fn` lowers into an enum and even if a mutable borrow is only needed in one of the variants (which aligns with a code block between two await points), the generated code will mutably borrow it for the entire `async fn` which greatly restricts how versitile the function is.
+
+-->
