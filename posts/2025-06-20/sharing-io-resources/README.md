@@ -9,7 +9,7 @@ draft: true
 
 ## Introduction
 
-Correctly mutablly sharing state in concurrenct code is a pain, this is true regardless of the language.
+Correctly sharing mutable state in concurrenct code is a pain, this is true regardless of the language.
 
 In Rust, it can be even more frustrating, in an effort to prevent you from shooting yourself in the foot it enforces XOR-aliasing rules that can be hard to follow, even for experts.
 
