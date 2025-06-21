@@ -1,9 +1,10 @@
 ---
 slug: sharing-io-resources
-title: [Rust] Ways of sharing IO resources in async code
+title: Ways of sharing IO resources in async code
 authors: [conectado]
 tags: [async, rust, futures, polling, concurrency, IO]
 date: 2025-06-20
+draft: true
 ---
 
 ## Introduction
