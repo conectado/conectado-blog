@@ -291,7 +291,7 @@ This creates a deadlock the first time a client tries to message another! when d
 
 <!-- Add a diagram illustrating the contention -->
 
-But that's not all, even if you manage to avoid deadlocks this isn't very good, we need to hold a lock as long as it takes one socket to write, this means only one client can write at a time, slowing down the whole processing pipeline. A slow client can hold the queue for a very long time, and even if there's no slow client at some point this doesn't scale.
+But that's not all, even if you manage to avoid deadlocks this isn't very good, there's still head-of-the-line blocking, we need to hold a lock as long as it takes one socket to write, this means only one client can write at a time, slowing down the whole processing pipeline. A slow client can hold the queue for a very long time, and even if there's no slow client at some point this doesn't scale.
 
 <!-- Add a diagram showing how a task is making the other wait? -->
 
@@ -305,13 +305,96 @@ For anyone familiar with async coding in Rust this is expected, particularly, wh
 
 ### CSP-style (Actor model)
 
-So the classic way to avoid this is to use channels.
+> [!NOTE]
+> The code for this section can be found in the [csp](./csp) directory.
+
+So the classic way to avoid this pitfall is to use channels.
+
+There are actually 2 patterns that use the channel primitive, CSP-style and actor model. The differences are subtle and they are not the focus of this article.
+
+Instead of having a mutex to share state among connections, we have a single task that manages the state, therefore a Mutex isn't needed, instead we use a channel to send messages to that task.
+
+It looks like this:
+
+```rs
+struct Router {
+    tx: mpsc::Sender<Message>,
+}
+
+impl Router {
+    pub fn new() -> Router {
+        let (tx, rx) = mpsc::channel(100);
+        tokio::spawn(message_dispatcher(rx));
+        Router { tx }
+    }
+
+    pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let router = self.clone();
+
+                tokio::spawn(async move {
+                    router.handle_connection(socket).await;
+                });
+            }
+        })
+    }
+
+    async fn handle_connection(&self, socket: TcpStream) {
+        let (mut read, write) = socket.into_split();
+        self.tx.send(Message::New(write)).await.unwrap();
+
+        let mut buffer = BytesMut::new();
+
+        loop {
+            let n = read.read_buf(&mut buffer).await.unwrap();
+            assert!(n != 0);
+
+            let Ok((dest, m)) = parse_message(&mut buffer) else {
+                continue;
+            };
+
+            self.tx.send(Message::Send(dest, m)).await.unwrap();
+        }
+    }
+}
+
+async fn message_dispatcher(mut rx: mpsc::Receiver<Message>) {
+    let mut connections = Vec::new();
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            Message::New(mut connection) => {
+                let id = connections.len();
+                connection.write_u32(id as u32).await.unwrap();
+                connections.push(connection);
+            }
+            Message::Send(id, items) => {
+                connections[id as usize].write_all(&items).await.unwrap();
+            }
+        }
+    }
+}
+
+enum Message {
+    New(OwnedWriteHalf),
+    Send(u32, Bytes),
+}
+```
+
+This is very nice, as there's no mutex and thus no deadlocks, but still, head-of-the-line blocking is there!
+
+After receiving a message in the `message_dispatcher` we call `connections[id].write_all().await` that blocks until we write to that connection preventing us from handling the next message.
+
+
 
 ### Reactor
 
 #### Hand-rolled future
 
-#### Recoverying async/await
+#### Race (select)
 
 #### Benefits and drawbacks
  
