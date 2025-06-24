@@ -75,6 +75,8 @@ We will assume these unrealistic simplifications.
 * Once a client connects it never disconnects
 * A client will never sends a message to itself
 
+This protocol could cause the clients to recieve segmented messages without possibility to distinguish between them but let's ignore that too.
+
 ## Solutions
 
 ### Tests
@@ -388,13 +390,243 @@ This is very nice, as there's no mutex and thus no deadlocks, but still, head-of
 
 After receiving a message in the `message_dispatcher` we call `connections[id].write_all().await` that blocks until we write to that connection preventing us from handling the next message.
 
+We could have `connections` be a `Vec<Arc<Mutex<OwnedWriteHalf>>>` and spawn a new task where we write to that owned write half instead of doing it in-task, but again, mutexes are a possible foot-gun.
 
+So we could instead apply a channel per writing half too. We can change the `message_dispatcher` to something like this.
+
+```rs
+async fn central_dispatcher(mut rx: mpsc::Receiver<Message>) {
+    let mut writers = Vec::new();
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            Message::New(connection) => {
+                let (tx, rx) = mpsc::channel(100);
+
+                tokio::spawn(client_dispatcher(connection, rx));
+                let id = writers.len();
+                tx.send(Bytes::from_owner((id as u32).to_be_bytes()))
+                    .await
+                    .unwrap();
+                writers.push(tx);
+            }
+            Message::Send(id, items) => {
+                writers[id as usize].send(items).await.unwrap();
+            }
+        }
+    }
+}
+
+async fn client_dispatcher(mut connection: OwnedWriteHalf, mut rx: mpsc::Receiver<Bytes>) {
+    loop {
+        let m = rx.recv().await.unwrap();
+        connection.write_all(&m).await.unwrap();
+    }
+}
+
+enum Message {
+    New(OwnedWriteHalf),
+    Send(u32, Bytes),
+}
+```
+
+> [!NOTE]
+> The full code for this version can be found in the [csp-channel-per-writer](./csp-channel-per-writer) directory.
+
+This is a bit better, channel's `send` with complete immediatley except when the channel is full. But it still has some drawbacks.
+
+For one, it could be full, a very slow client could cause that then we are back again at a point where it's blocking. We could always fix it by spawning a new task to send to the client's dispatcher.
+
+We could also do something like this:
+
+```rs
+        match msg {
+            Message::New(connection) => {
+                let (tx, rx) = mpsc::channel(100);
+
+                let w = tx.clone();
+                let id = writers.len();
+                tokio::spawn(client_dispatcher(connection, rx));
+                tokio::spawn(async move {
+                    w.send(Bytes::from_owner((id as u32).to_be_bytes()))
+                        .await
+                        .unwrap();
+                });
+                writers.push(tx);
+            }
+            Message::Send(id, items) => {
+                let w = writers[id as usize].clone();
+                tokio::spawn(async move {
+                    w.send(items).await.unwrap();
+                });
+            }
+        }
+```
+
+Now this solves the problem, but then you have new tasks to manage, those can't access the shared state. So as you add more state and more tasks to complete the number of tasks and channels keep scaling.
+
+This can quickly become hard to manage if you don't find the right abstractions.
+
+And the problem with channel is that it's very prone to action-at-a-distance. Meaning, when you spawn a channel, the reciever and transmitter starts moving around and you can quickly lose where those came from.
+
+Furthermore, when we created a channel, we set the limit for that channel, afterwards it creates backpressure. Which is a nice feature for bounded channel, but you need to tune that number and it's not always obvious what number should go there.
+
+You could always use unbounded channels and save yourselve all these problems, this isn't recommended as unbounded memory allocation can lead to a new set of different problems.
 
 ### Reactor
 
 #### Hand-rolled future
 
+There's another option that's way less discussed, if you think about it, what we want to do is:
+
+If there's a new connection, grab it, and store it.
+If there's a message in a socket try to parse it and forward it if it's complete.
+As the sender becomes available try to send pending messages.
+If none of the before are true, just don't do anything until you're signaled that one of these has happened.
+
+Well, we could manually express this.
+
+First let's begin by implementing this abstraction
+
+```rs
+struct Socket {
+    write_buffer: BytesMut,
+    read_buffer: BytesMut,
+    stream: TcpStream,
+    waker: Option<Waker>,
+}
+
+impl Socket {
+    fn new(stream: TcpStream) -> Socket {
+        Socket {
+            write_buffer: BytesMut::new(),
+            read_buffer: BytesMut::new(),
+            waker: None,
+            stream,
+        }
+    }
+
+    fn send(&mut self, buf: &[u8]) {
+        self.write_buffer.put_slice(buf);
+        let Some(w) = self.waker.take() else {
+            return;
+        };
+        w.wake_by_ref();
+    }
+
+    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.write_buffer.is_empty() {
+            self.waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        loop {
+            ready!(self.stream.poll_write_ready(cx)).unwrap();
+            let Ok(n) = self.stream.try_write(&self.write_buffer) else {
+                continue;
+            };
+            self.write_buffer.advance(n);
+            return Poll::Ready(());
+        }
+    }
+
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<&mut BytesMut> {
+        loop {
+            ready!(self.stream.poll_read_ready(cx)).unwrap();
+            let Ok(_) = self.stream.try_read_buf(&mut self.read_buffer) else {
+                continue;
+            };
+
+            return Poll::Ready(&mut self.read_buffer);
+        }
+    }
+}
+```
+
+now we can re-implement the `Router` like this.
+
+```rs
+struct Router {
+    connections: Vec<Socket>,
+    listener: TcpListener,
+}
+
+impl Router {
+    async fn new() -> Router {
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        Router {
+            connections: vec![],
+            listener,
+        }
+    }
+
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        loop {
+            if let Poll::Ready(Ok((connection, _))) = self.listener.poll_accept(cx) {
+                let mut socket = Socket::new(connection);
+                let id = self.connections.len() as u32;
+                socket.send(&id.to_be_bytes());
+                self.connections.push(socket);
+                continue;
+            }
+
+            for conn in &mut self.connections {
+                loop {
+                    if conn.poll_send(cx).is_pending() {
+                        break;
+                    }
+                }
+            }
+
+            for i in 0..self.connections.len() {
+                let Poll::Ready(buf) = self.connections[i].poll_read(cx) else {
+                    continue;
+                };
+
+                let Ok((dest, b)) = parse_message(buf) else {
+                    continue;
+                };
+
+                self.connections[dest as usize].send(&b);
+            }
+
+            return Poll::Pending;
+        }
+    }
+
+    async fn handle_connections(&mut self) {
+        poll_fn(move |cx| self.poll_next(cx)).await;
+    }
+}
+```
+
+Notice that there's no blocking operations here, some care has been taken to preserve fairness, meaning that all sockets are always polled for readiness in each iteratoion of the loop.
+
+Also, we need to be very careful about always registering the waker into a pending future before returning pending otherwise we might miss the event that wake us.
+
+But in this case, no care has to be taken to share mutable state, the `poll_next` function just takes an `&mut self`.
+
+The difference  with the previous method, is here instead of calling `.await` and immediatley suspend the task, we are able to poll any future for readiness before suspending.
+
+This way none of the futures needs hold a mutable reference, instead we just ask if any of the futures is ready and if it's execute our mutations right there otherwise we ask for the otehr futures.
+
+We just suspend after we know that all futures aren't ready and that's it.
+
+In this way sure, if we are calling `Router::handle_connections` and awaiting on that no one else can mutate `handle_connections` but within `Router`, our shared state, `poll_next` only holds and `&mut self` as long as it's running. 
+
+But taking a careful look at this we can notice another way to put this.
+
+We could have a single place where we ask "Is any I/O ready? if it's let me handle it synchroneously, tell me what exactly and I'll handle it synchroneously, otherwise we keep waiting".
+
+And there's an async/await construct that does basically this, `select`.
+
 #### Race (select)
+
+There's an alternative to select in the crate `futures-util` called `Race`. It's very simlar to `select` but only gives us the result as a return value and it works with tuples.
+
+Let's re-write the hand-rolled version using this.
 
 #### Benefits and drawbacks
  
+#### Sans-IO
+
+### Conclusion
