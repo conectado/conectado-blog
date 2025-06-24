@@ -621,12 +621,155 @@ And there's an async/await construct that does basically this, `select`.
 
 #### Race (select)
 
-There's an alternative to select in the crate `futures-util` called `Race`. It's very simlar to `select` but only gives us the result as a return value and it works with tuples.
+There's an alternative to select in the crate `futures-concurrency` called `Race`. It's very simlar to `select` but only gives us the result as a return value and it works with tuples.
 
 Let's re-write the hand-rolled version using this.
 
+First we will have a slightly different version of the socket.
+
+```rs
+struct ReadSocket {
+    buffer: BytesMut,
+    reader: OwnedReadHalf,
+}
+
+impl ReadSocket {
+    fn new(reader: OwnedReadHalf) -> ReadSocket {
+        ReadSocket {
+            buffer: BytesMut::new(),
+            reader,
+        }
+    }
+
+    async fn read(&mut self) -> &mut BytesMut {
+        self.reader.read_buf(&mut self.buffer).await.unwrap();
+        &mut self.buffer
+    }
+}
+
+struct WriteSocket {
+    buffer: BytesMut,
+    writer: OwnedWriteHalf,
+}
+
+impl WriteSocket {
+    fn new(writer: OwnedWriteHalf) -> WriteSocket {
+        WriteSocket {
+            buffer: BytesMut::new(),
+            writer,
+        }
+    }
+
+    async fn advance_send(&mut self) -> Event {
+        loop {
+            if !self.buffer.has_remaining() {
+                std::future::pending::<Event>().await;
+            }
+
+            self.writer.write_all_buf(&mut self.buffer).await.unwrap();
+        }
+    }
+
+    fn send(&mut self, buf: &[u8]) {
+        self.buffer.put_slice(buf);
+    }
+}
+```
+We change the `Event` to
+
+```rs
+enum Event<'a> {
+    Read(&'a mut BytesMut),
+    Connection(TcpStream),
+}
+```
+
+and now `Router` looks like this.
+
+```rs
+impl Router {
+    async fn new() -> Router {
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        Router {
+            read_connections: vec![],
+            write_connections: vec![],
+            listener,
+        }
+    }
+
+    async fn handle_connections(&mut self) {
+        loop {
+            let s3 = self
+                .listener
+                .accept()
+                .boxed()
+                .map(|r| Event::Connection(r.unwrap().0));
+
+            let ev = if self.read_connections.is_empty() || self.write_connections.is_empty() {
+                s3.await
+            } else {
+                let s1 = select_all(self.read_connections.iter_mut().map(|c| c.read().boxed()))
+                    .map(|(d, ..)| Event::Read(d));
+                let s2 = select_all(
+                    self.write_connections
+                        .iter_mut()
+                        .map(|c| c.advance_send().boxed()),
+                )
+                .map(|(e, _, _)| e);
+                (s1, s2, s3).race().await
+            };
+            match ev {
+                Event::Read(bytes_mut) => {
+                    let Ok((i, d)) = parse_message(bytes_mut) else {
+                        continue;
+                    };
+                    self.write_connections[i as usize].send(&d);
+                }
+                Event::Connection(tcp_stream) => {
+                    let (r, w) = tcp_stream.into_split();
+                    let mut write_sock = WriteSocket::new(w);
+                    write_sock.send(&(self.write_connections.len() as u32).to_be_bytes());
+                    self.read_connections.push(ReadSocket::new(r));
+                    self.write_connections.push(write_sock);
+                }
+            }
+        }
+    }
+}
+```
+
+Now we're modeling I/O as a stream of events. We suspend execution while awaiting any of those events, each time one of the events happen we're signaled about it.
+
+In response we handle the event synchroneously, in a context where we have mutable access to the state. 
+
 #### Benefits and drawbacks
+
+This model, recovers the async/await format that can be very useful, as it's harder to put your application in a state where it'll never continue doing work.
+
+However, it comes at a price, in the previous version any time we `poll` a future we can use the shared mutable state this give us more flexibility on how we organize state and very importantly it can prevent additional copies.
+
+For example, both of this versions aren't zero-copy but on the first version we could modify it a little to be zero-copy. In all fairness, thanks to the `Bytes` crate  
+
+<!-- TODO: examples on both of these -->
+
+Another benefit of hand-rolling your future instead of using something like `select` or `race` is that the polling and fairness becomes very transparent, and also cancellation-safety is plain to see.
+
+It becomes easier to debug why your application hangs, as you can easily see how the polling and registration of wakers is done.
  
 #### Sans-IO
+
+Sans-IO is a model for network protocol, where you implement them in an IO-agnostic way, as a state machine that's evolved by outside events.
+
+You might immediatley see the link with the reactor model, where we seggregate the events emitted by the IO to the state of the application.
+
+Both of these approaches work very well in tandem, one might say they are the same approach, reactor pattern seen from the perspective of how to actually structure the IO and Sans-IO on how to organize your code to react to those events.
+
+But actually Sans-IO has a standard way to be organized, using methods like `poll_timeout`, `handle_timeout`, `poll_event`, etc... there are a few more patterns. And you could actually integrate it with any of the I/O models in the previous section.
+
+And in theory, you could still do I/O when reacting to an event in the reactor pattern, though most of the time it'd defeat the point.
+
+So it's good to see them as 2 different approaches.
+
+To learn more about Sans-IO you could read...
 
 ### Conclusion
