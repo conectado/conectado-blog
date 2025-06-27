@@ -66,7 +66,7 @@ The clients can exchange the ID over a side channel, and then use it to craft me
 
 <!-- Diagram of the Message -->
 
-To send a message, a client sends the recipient’s ID, followed by the message bytes, ending with a null byte (\0).
+They can do this by sending the id to the server, followed by a nul-terminated stream of bytes.
 
 The server, once a complete message is read will forward the bytes to the corresponding peer, without including its ID. 
 
@@ -82,21 +82,21 @@ We will assume these unrealistic simplifications.
 * A client will never sends a message to itself
 * The Server once started will never stop
 
-This protocol could cause the clients to recieve segmented messages without possibility to distinguish between them but let's ignore that too.
+This protocol could cause the clients to recieve segmented messages from different clients without the possibility to distinguish between them but let's ignore that too.
 
 ## Tests
 
 First, let's write some test to get a feeling of how the protocol should behave.
 
-Just something simple to show expectations, not a way to catch edge cases.
+Just something simple to set expectations and exemplify how this should work, not a way to catch edge cases.
 
-For our first implementation the interface will be an struct:
+For our first implementation the interface for the protocol will be:
 
 ```rs
-struct Router;
+struct Server;
 
-impl Router {
-  pub fn new() -> Router;
+impl Server {
+  pub fn new() -> Server;
   pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()>;
 }
 ```
@@ -170,7 +170,7 @@ Simply put:
 ### Mutex
 
 > [!NOTE]
-> The code for this example can be found in the [naive](./naive) directory
+> The code for this example can be found in the [mutex](./mutex) directory
 
 A first approach one can make is using `Mutex` and it looks a bit like this:
 
