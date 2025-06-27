@@ -96,16 +96,16 @@ For our first implementation the interface for the protocol will be:
 struct Server;
 
 impl Server {
-  pub fn new() -> Server;
+  pub async fn new() -> Server;
   pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()>;
 }
 ```
 
-We will evolve the signatures slightly in the different implementations but the test can be trivially fixed.
+> [!TIP]
+> The signature of `Server::handle_connections` will change slightly to use `&mut self` in some future sections, but updating the tests is trivial.
+> Anyways, there will be a full implementation including test for each of the examples.
 
-Anyways, each implementation can be found in a directory that'll be linked in each section of the article if you want to see the details
-
-So the test will be:
+So our basic test will be this:
 
 ```rs
 #[cfg(test)]
@@ -118,52 +118,49 @@ mod tests {
         net::TcpStream,
     };
 
-    use crate::Router;
+    use crate::Server;
 
     #[tokio::test]
     async fn it_works() {
-        const INT_MSG1: &str = "hello, number 2\0";
-        const INT_MSG2: &str = "hello back, number 1\0";
+        const MSG1: &str = "hello, number 2\0";
+        const MSG2: &str = "hello back, number 1\0";
 
-        let router = Arc::new(Router::new());
-        router.handle_connections().await;
+        let router = Arc::new(Server::new().await);
+        tokio::spawn(router.handle_connections());
 
         let mut sock1 = TcpStream::connect("127.0.0.1:8080").await.unwrap();
         let mut sock2 = TcpStream::connect("127.0.0.1:8080").await.unwrap();
+
         let id1 = sock1.read_u32().await.unwrap();
         let id2 = sock2.read_u32().await.unwrap();
 
-        let mut msg1 = Vec::new();
-        msg1.extend_from_slice(&id2.to_be_bytes());
-        msg1.extend_from_slice(INT_MSG1.as_bytes());
-
-        sock1.write_all(&msg1).await.unwrap();
+        sock1.write_u32(id2).await.unwrap();
+        sock1.write_all(MSG1.as_bytes()).await.unwrap();
         sock1.flush().await.unwrap();
-        let mut buf = [0; INT_MSG1.len()];
+
+        let mut buf = [0; MSG1.len()];
         sock2.read_exact(&mut buf).await.unwrap();
 
-        assert_eq!(str::from_utf8(&buf).unwrap(), INT_MSG1);
+        assert_eq!(str::from_utf8(&buf).unwrap(), MSG1);
 
-        let mut msg2 = Vec::new();
-        msg2.extend_from_slice(&id1.to_be_bytes());
-        msg2.extend_from_slice(INT_MSG2.as_bytes());
-
-        sock2.write_all(&msg2).await.unwrap();
+        sock2.write_u32(id1).await.unwrap();
+        sock2.write_all(MSG2.as_bytes()).await.unwrap();
         sock2.flush().await.unwrap();
-        let mut buf = [0; INT_MSG2.len()];
+
+        let mut buf = [0; MSG2.len()];
         sock1.read_exact(&mut buf).await.unwrap();
 
-        assert_eq!(str::from_utf8(&buf).unwrap(), INT_MSG2);
+        assert_eq!(str::from_utf8(&buf).unwrap(), MSG2);
     }
 }
 ```
 
 Simply put:
 
-1. We start the router in the background
-1. Create to sockets and connect each to the router getting the ids in response
-1. Send a message on one socket to the other
-1. Assert that we got the message on the other end
+1. We start the server in the background.
+1. Create to sockets and connect each to the router getting the ids in response.
+1. Send a message from one socket to the other comforming to the previously laid out protocol.
+1. Assert that we got the verbatim message on the other end.
 
 ## Implementations
 
