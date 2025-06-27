@@ -35,7 +35,7 @@ IO-bound apps which are mostly composed of IO-bound tasks benefit greatly from t
 
 <!-- Diagram here on how tasks share execution-->
 
-Since calling `await` suspends the execution of a task, so you need to spawn a new one to allow other work to continue, the new task can outlive the spawnee so it requires the spawned future to be `'static`.
+Since calling `await` suspends the execution of a task you need to spawn a new one to allow other work to continue, the new task can outlive the spawnee so it requires the spawned future to be `'static`.
 
 This means, as I mentioned before, that you can't hold an `&mut` reference to the state in your new task. Even if you use a `LocalSet` the `'static` requirement is still there. This means to share mutable state you need to either use `Mutex` or a `channel`.
 
@@ -51,40 +51,40 @@ So my idea, with the following example is to evolve it with the different more c
 
 This is a small and simplified, yet almost realistic, scenario. I'll pick some artificial constraints just to save us from some error handling and a few lines of code so we can focus on the core of the issue, namely, sharing mutable state across IO events.
 
-> ![NOTE]
+> [!NOTE]
 > All the numbers are sent in the wire in network-order.
 
-We will writer a "Router", each client connects to the router over TCP and is assigned an id, that's immediatley return over that same socket.
-
-Once a client receive this id  it can be shared with any peer through a side-channel. And peers can use this ID to send messages to any other clients connected to the router.
+We will be writing a server that clients can connect to and subsequently exchange messages between them, through it.
 
 <!-- Diagram of the problem -->
 
-The ID is always returned immediatley from the router to the client and it it's always a 4-bytes message that contains the ID as u32.
+Clients will connect over a TCP socket to the server, and they will immediatley be assigned an id, which will be sent as a 4 bytes response.
 
 <!-- Diagram of the ID message -->
 
-At any point afterwards any client can send a message to another by sending a message composed of the client's ID followed by any message terminated by a nul-byte
+The clients can exchange the ID over a side channel, and then use it to craft messages directed to other clients.
 
 <!-- Diagram of the Message -->
 
-This message will be forwarded to the destination client after being stripped of the ID header.
+To send a message, a client sends the recipient’s ID, followed by the message bytes, ending with a null byte (\0).
 
-<!-- Diagram of the forwarded message -->
+The server, once a complete message is read will forward the bytes to the corresponding peer, without including its ID. 
+
+<!-- Full sequence diagram -->
 
 We will assume these unrealistic simplifications.
 
 * Every client is well-behaved and will never abuse the protocol
-  * This also means clients will always send complete messages
+  * This also means clients will always send complete messages and won't start a new one without finishing the one before
+  * Every message the client send conform to the protocol and the id of the client it wants to communicate with is always valid.
 * There are no OS errors
 * Once a client connects it never disconnects
 * A client will never sends a message to itself
+* The Server once started will never stop
 
 This protocol could cause the clients to recieve segmented messages without possibility to distinguish between them but let's ignore that too.
 
-## Solutions
-
-### Tests
+## Tests
 
 First, let's write some test to get a feeling of how the protocol should behave.
 
@@ -165,8 +165,9 @@ Simply put:
 1. Send a message on one socket to the other
 1. Assert that we got the message on the other end
 
+## Implementations
 
-### Naive
+### Mutex
 
 > [!NOTE]
 > The code for this example can be found in the [naive](./naive) directory

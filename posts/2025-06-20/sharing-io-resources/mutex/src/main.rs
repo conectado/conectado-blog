@@ -6,33 +6,33 @@ use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 #[tokio::main]
 async fn main() {
-    let router = Arc::new(Router::new());
+    let router = Arc::new(Server::new().await);
     router.handle_connections().await.await.unwrap();
 }
 
-#[derive(Default)]
-struct Router {
+struct Server {
+    listener: TcpListener,
     connections: tokio::sync::Mutex<Vec<OwnedWriteHalf>>,
 }
 
-impl Router {
-    pub fn new() -> Router {
-        Default::default()
+impl Server {
+    pub async fn new() -> Server {
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        Server {
+            listener,
+            connections: Default::default(),
+        }
     }
 
     pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        loop {
+            let (socket, _) = self.listener.accept().await.unwrap();
+            let router = self.clone();
 
-        tokio::spawn(async move {
-            loop {
-                let (socket, _) = listener.accept().await.unwrap();
-                let router = self.clone();
-
-                tokio::spawn(async move {
-                    router.handle_connection(socket).await;
-                });
-            }
-        })
+            tokio::spawn(async move {
+                router.handle_connection(socket).await;
+            });
+        }
     }
 
     async fn handle_connection(&self, socket: TcpStream) {
@@ -91,41 +91,38 @@ mod tests {
         net::TcpStream,
     };
 
-    use crate::Router;
+    use crate::Server;
 
     #[tokio::test]
     async fn it_works() {
-        const INT_MSG1: &str = "hello, number 2\0";
-        const INT_MSG2: &str = "hello back, number 1\0";
+        const MSG1: &str = "hello, number 2\0";
+        const MSG2: &str = "hello back, number 1\0";
 
-        let router = Arc::new(Router::new());
-        router.handle_connections().await;
+        let router = Arc::new(Server::new().await);
+        tokio::spawn(router.handle_connections());
 
         let mut sock1 = TcpStream::connect("127.0.0.1:8080").await.unwrap();
         let mut sock2 = TcpStream::connect("127.0.0.1:8080").await.unwrap();
+
         let id1 = sock1.read_u32().await.unwrap();
         let id2 = sock2.read_u32().await.unwrap();
 
-        let mut msg1 = Vec::new();
-        msg1.extend_from_slice(&id2.to_be_bytes());
-        msg1.extend_from_slice(INT_MSG1.as_bytes());
-
-        sock1.write_all(&msg1).await.unwrap();
+        sock1.write_u32(id2).await.unwrap();
+        sock1.write_all(MSG1.as_bytes()).await.unwrap();
         sock1.flush().await.unwrap();
-        let mut buf = [0; INT_MSG1.len()];
+
+        let mut buf = [0; MSG1.len()];
         sock2.read_exact(&mut buf).await.unwrap();
 
-        assert_eq!(str::from_utf8(&buf).unwrap(), INT_MSG1);
+        assert_eq!(str::from_utf8(&buf).unwrap(), MSG1);
 
-        let mut msg2 = Vec::new();
-        msg2.extend_from_slice(&id1.to_be_bytes());
-        msg2.extend_from_slice(INT_MSG2.as_bytes());
-
-        sock2.write_all(&msg2).await.unwrap();
+        sock2.write_u32(id1).await.unwrap();
+        sock2.write_all(MSG2.as_bytes()).await.unwrap();
         sock2.flush().await.unwrap();
-        let mut buf = [0; INT_MSG2.len()];
+
+        let mut buf = [0; MSG2.len()];
         sock1.read_exact(&mut buf).await.unwrap();
 
-        assert_eq!(str::from_utf8(&buf).unwrap(), INT_MSG2);
+        assert_eq!(str::from_utf8(&buf).unwrap(), MSG2);
     }
 }
