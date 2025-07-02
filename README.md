@@ -1,32 +1,29 @@
-# Conectado's Technical Writing & Deep Dives
+# Conectado's Blog
 
-Welcome to my technical blog! I write about systems programming, networking, and the interesting engineering challenges I encounter while building software.
+This is my technical blog, where I write mostly about rust.
 
 ## Latest Articles
 
-### [You don't need `async`](https://github.com/conectado/Blog/blob/d216c90488858eaba789ca9c8c9353c83f35b692/posts/2025-06-08/you-dont-need-async/README.md)
+* [The scary and surprisingly deep rabbit hole of Rust's temporaries]()
+
+### Writeups
+
+* [Unexpected(for me) behavior in drop order](https://gist.github.com/conectado/25076d49734e692e51b7c5b4f2d3d7ff)
 
 ---
 
 ## About
 
-I'm a systems engineer with a focus on networking, security, and performance. I enjoy diving deep into the technical details of how things work under the hood and sharing what I learn along the way.
+I'm a Rust engineer with a focus on Networking, I also have an interest in Security, Maths and Physics. I love to understand stuff for the sake of it.
 
-Currently working on networking infrastructure and VPN technology. When I encounter interesting problems or build cool solutions, I write about them here.
-
-## Topics I Write About
-
-- **Systems Programming** - Rust!
-- **Networking** - Packet processing, firewalls, VPNs
-- **Performance** - Optimization, profiling, benchmarking
-- **Security** - Network security, access control
-- **Infrastructure** - Distributed systems, reliability
+Currently working on networking infrastructure and VPN technology. Trying to be good about writing more, it's fun!
 
 ## Get in Touch
 
 - GitHub: [@conectado](https://github.com/conectado)
-- Email: gabrielalejandro7@gmail.com
-- [Resume](https://github.com/conectado/Blog/blob/main/resume.md)
+- Bluesky: [@tapingmemory.bsky.social](https://bsky.app/profile/tapingmemory.bsky.social)
+- Email: [gabrielalejandro7@gmail.com](mailto:gabrielalejandro7@gmail.com)
+- [Resume](./resume.md)
 ---
 
-*📝 All articles are written in Markdown and hosted directly on GitHub. Feel free to open issues for questions, corrections, or suggestions!*
+Feel free to open issues for questions, corrections, or suggestions.
