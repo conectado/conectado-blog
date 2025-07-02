@@ -86,9 +86,7 @@ This protocol could cause the clients to recieve segmented messages from differe
 
 ## Tests
 
-First, let's write some test to get a feeling of how the protocol should behave.
-
-Just something simple to set expectations and exemplify how this should work, not a way to catch edge cases.
+First, let's write some test to get a feeling of how the protocol should behave. We're just writing something simple to set expectations and exemplify how this should work, not a way to catch edge cases.
 
 For our first implementation the interface for the protocol will be:
 
