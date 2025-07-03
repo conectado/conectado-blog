@@ -51,7 +51,7 @@ But don't worry about reading the reference just yet; we will untangle that defi
 
 ## An incredibly deceptively simple example
 
- Take a look at [this example](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=e8b431f8f9924ccbf8bd0062072c7bfe).
+ Take a look at this example.
 
 ```rs
 struct Foo;
@@ -93,7 +93,7 @@ Somehow, when we declare `Foo` in `let x = Some(&Foo)` there's really no variabl
 
 Does this make sense? No? Kinda? Maybe we should just get the `Some` out of the way, it doesn't seem to be relevant for this discussion, and it shouldn't change anything.
 
-So now we can rewrite it like [this](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=81cfd9b515f43748d9c28b7bc81881a8)
+So now we can rewrite it like this.
 
 ```rs
 struct Foo;
@@ -117,7 +117,7 @@ Now that we have less noise, the error is a bit clearer— wait, this compiles!
 
 Okay, okay, let's go back to the previous version, as it seems like there's no temporary value in this one.
 
-So we had something like [this](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=b238411a5fa264d70d0ada3c75001346), right?
+So we had something like this, right?
 
 ```rs
 struct Foo;
@@ -182,7 +182,7 @@ Place expressions are expressions that represent a location in memory. Value exp
 
 With this in mind, when value expressions are used in place expression contexts, a temporary memory location is created, and the value of the expression is placed there. The expression then represents the temporary memory location.
 
-Let's see one of the [simplest examples](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=0ae71bc6e7f26c45720a97b7030263fa) of temporaries.
+Let's see one of the simplest examples of temporaries.
 
 ```rs
 struct Foo;
@@ -194,7 +194,7 @@ fn main() {
 
 Since `Foo` is a value expression, and it's in a place expression context, the right-hand side of a let statement, it creates a temporary memory location. `Foo` is then inserted in the temporary, and the value in there is returned.
 
-Let's look at another [simple example](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=d1429a273ec4b7208a4b66efc72fc8f3).
+Let's look at another simple example.
 
 ```rs
 struct Foo;
@@ -206,7 +206,7 @@ fn main() {
 
 Again, since `Foo` is a value expression in a place expression context, a temporary memory location is created. In this case, the place expression context is the operand of a `&` operator. `Foo` is then placed in the temporary, and now `&Foo` represents a reference to that anonymous memory location.
 
-Going back to the previous example, you can still do [this](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=0e6402326e540045af2ef19fe9d5699e) and still have the program compile.
+Going back to the previous example, you can still do this and still have the program compile.
 
 ```rs
 struct Foo;
@@ -217,7 +217,7 @@ fn main() {
 }
 ```
 
-You can even do [this](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=42a851543560d309637429160ddf486d) and have the program still compile!
+You can even do this and have the program still compile!
 
 ```rs
 struct Foo;
@@ -305,7 +305,7 @@ fn main() {
 
 Luckily, this case is not complicated. The initializer (the right-hand side) of a let statement is a place expression context, and since `Foo` is a value expression, a temporary memory location is created where the value is held. But values [can always be moved out from temporaries](https://doc.rust-lang.org/stable/reference/expressions.html#r-expr.move.movable-place)[^1], so `Foo` is moved into `x`, which is a variable with a scope of the whole main function; therefore, it's still alive for the next line, and this program is valid!
 
-Okay, good, but then explain [this](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=7385686e3d0cca78a84367228ce2cdae)! (It compiles)
+Okay, good, but then explain this! (It compiles)
 
 ```
 struct Foo;
@@ -427,7 +427,7 @@ fn main() {
 
 ### Lifetime extension
 
-First, let's check another [example](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=d96a90d732614dac7b24f970f5b3a734):
+First, let's check another example:
 
 ```rs
 struct Foo;
@@ -573,7 +573,7 @@ The reference then tells us exactly when lifetime extension happens based on an 
 
 Okay, simple enough.
 
-Let's look at [this program](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=73420c69addb453c7c4bdc8ecbd39ff6):
+Let's look at this program:
 
 ```rs
 struct Foo(Bar);
@@ -602,7 +602,7 @@ last line of the program
 
 [Field access](https://doc.rust-lang.org/stable/reference/expressions/field-expr.html#r-expr.field) operands are place expression contexts, `Foo(Bar)` in `Foo(Bar).0` is that kind of operand. Since it's a value expression, it's placed in a temporary. `Foo(Bar).0` copies `Bar` itself into `x`, but `Foo` remains at the temporary memory location and is then dropped at the end of the `let` statement. Note that there's no lifetime extension due to an extending expression since there's no borrow. And no pattern-based extension, since `x` isn't an extending pattern.
 
-However, in [this example](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=5ffac3d44470f7a63dddae00f1d23c1a) there's pattern-based extension.
+However, in this example there's pattern-based extension.
 
 ```rs
 struct Foo(Bar);
@@ -631,7 +631,7 @@ foo dropped
 
 Since `ref x` is an extending pattern, the expression `Foo(Bar).0` has its lifetime extended, and from a few paragraphs above, you might [remember that](https://doc.rust-lang.org/stable/reference/destructors.html#r-destructors.scope.lifetime-extension.sub-expressions) "If a borrow, dereference, field, or tuple indexing expression has an extended temporary scope, then so does its operand." This means that the temporary that holds `Foo` has its lifetime extended, causing it to drop at the end of the main block, after the last line of the program.
 
-Note that, if no lifetime extension happened, [this program](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=bd0c9a9b48a4f12cb48a5cea4bf8bbe6) would not compile.
+Note that, if no lifetime extension happened, this program would not compile.
 
 ```rs
 struct Foo(Bar);
