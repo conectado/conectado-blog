@@ -4,6 +4,9 @@ This is my technical blog, where I write, mostly about rust.
 
 ## Latest Articles
 
+> [!NOTE]
+> I originally meant for articles to be readable in github or the blog but the images won't work in github and front matter looks weird.
+
 * [The scary and surprisingly deep rabbit hole of Rust's temporaries](content/temporaries-rabbit-hole.md)
 
 ### Writeups
@@ -25,6 +28,7 @@ Currently working on networking infrastructure and VPN technology. Trying to be 
 - GitHub: [@conectado](https://github.com/conectado)
 - Bluesky: [@tapingmemory.bsky.social](https://bsky.app/profile/tapingmemory.bsky.social)
 - Email: [gabrielalejandro7@gmail.com](mailto:gabrielalejandro7@gmail.com)
+- [Linkedin](https://www.linkedin.com/in/gabriel-s-40186a155)
 - [Resume](./resume.md)
 ---
 
