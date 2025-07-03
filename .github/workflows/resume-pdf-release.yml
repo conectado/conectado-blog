@@ -1,0 +1,52 @@
+name: Build and Release Resume PDF
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'resume.md'  # Only triggers when resume.md changes
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Convert resume.md to PDF
+      uses: docker://pandoc/latex:latest
+      with:
+        args: >-
+          resume.md
+          --output=resume.pdf
+          --pdf-engine=xelatex
+          --variable=geometry:margin=0.75in
+          --variable=fontsize:11pt
+          --variable=colorlinks:true
+          --variable=linkcolor:blue
+          --variable=urlcolor:blue
+    
+    - name: Delete existing latest release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Delete the release and tag if they exist
+        gh release delete latest --yes || true
+        git push --delete origin latest || true
+      continue-on-error: true
+    
+    - name: Create latest release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release create latest resume.pdf \
+          --title "Latest Resume" \
+          --notes "Latest version of resume (updated $(date +'%Y-%m-%d %H:%M UTC'))
+
+        **Last commit:** ${{ github.event.head_commit.message }}
+        **Commit SHA:** ${{ github.sha }}
+        
+        Generated from \`resume.md\` using pandoc."
