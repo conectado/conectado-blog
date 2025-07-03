@@ -40,7 +40,7 @@ error[E0716]: temporary value dropped while borrowed
 
 So, what if I told you temporary values don't exists?
 
-![Morpheus what if I told you meme](https://gist.github.com/user-attachments/assets/43a703c8-82e2-40f8-a56f-d3c950f34196)
+![Morpheus what if I told you meme](/images/temporaries-rabbit-hole/memes/morpheus.png)
 
 Got your attention? Good.
 
@@ -112,7 +112,7 @@ fn main() {
 Now that we have less noise, the error is a bit clearer— wait, this compiles!
 
 
-![huh??](https://gist.github.com/user-attachments/assets/d6e722fe-cd66-42c4-aeb3-eab78604b75d)
+![huh??](/images/temporaries-rabbit-hole/memes/what.gif)
 
 
 Okay, okay, let's go back to the previous version, as it seems like there's no temporary value in this one.
@@ -132,11 +132,10 @@ And the error was... wait, I forgot the `Drop` impl for `Foo`. Well, it shouldn'
 
 Wait this compiles...
 
-![what did you say?](https://gist.github.com/user-attachments/assets/9b533888-e012-43de-9b7f-3e30b6fd6a0a)
+![go on....](/images/temporaries-rabbit-hole/memes/go-on.png)
 
 Now I better tell you what's really going on here.
 
-![go on....](https://gist.github.com/user-attachments/assets/d90918e8-d74f-46cf-b0f4-a65b94ec6b6f)
 
 ## What's going on
 
@@ -144,7 +143,7 @@ Let's begin with the beginning. The reference manual defines temporaries as:
 
 > When using a value expression in most place expression contexts, a temporary unnamed memory location is created and initialized to that value. The expression evaluates to that location instead, except if promoted to a static. The drop scope of the temporary is usually the end of the enclosing statement.
 
-![did you really think I was done with the memes?](https://gist.github.com/user-attachments/assets/2e890201-a97d-4c1a-80f3-5d9ebf774708)
+![did you really think I was done with the memes?](/images/temporaries-rabbit-hole/memes/nerd.png)
 
 
 Okay, that definition is confusing, let's zoom in on the first part.
@@ -316,7 +315,7 @@ fn main() {
 }
 ```
 
-![pikachu.jpeg](https://gist.github.com/user-attachments/assets/1c1b2122-b3ea-4e88-bc85-0a1b6fe69678)
+![pikachu.jpeg](/images/temporaries-rabbit-hole/memes/pikachu.png)
 
 ### Constant Promotion
 
@@ -423,7 +422,7 @@ fn main() {
 
 *sigh*, I finally need to explain lifetime extension for temporaries.
 
-![why do I hear boss music?](https://gist.github.com/user-attachments/assets/b358944a-a9ee-40a5-a208-3ca756ccd66d)
+![why do I hear boss music?](/images/temporaries-rabbit-hole/memes/boss-music.png)
 
 ### Lifetime extension
 
@@ -518,7 +517,7 @@ And for a more complicated case: `let x = &((), ((), &Foo));`, the expression `&
 
 Get it?!
 
-![Pepe Silvia](https://gist.github.com/user-attachments/assets/eafaaebc-1d0c-4fbc-a757-7c8d37620f7d)
+![Pepe Silvia](/images/temporaries-rabbit-hole/memes/pepesilvia.png)
 
 Note also that `Some(<expr>)` is a [call expression](https://doc.rust-lang.org/stable/reference/expressions/call-expr.html?highlight=call%20exp#call-expressions), which I will not get into[^3]. And the operands to call expressions are not mentioned in the types of extending expressions. Meaning that, while `Some(&Foo)` in `let x = Some(&Foo);` is an extending expression, `&Foo` isn't. Therefore, in that statement, there's no extending expression with a borrow, so no lifetime extension happens.
 
