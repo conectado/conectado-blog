@@ -46,7 +46,7 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        gh release create latest resume.pdf \
+        gh release create latest gabriel-steinberg-rust-engineer-resume.pdf \
           --title "Latest Resume" \
           --notes "Latest version of resume (updated $(date +'%Y-%m-%d %H:%M UTC'))
 
