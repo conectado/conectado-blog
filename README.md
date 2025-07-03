@@ -1,6 +1,6 @@
-# Conectado's Blog
+# Taping Memory
 
-This is my technical blog, where I write mostly about rust.
+This is my technical blog, where I write, mostly about rust.
 
 ## Latest Articles
 
