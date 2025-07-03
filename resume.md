@@ -8,6 +8,7 @@
 - **LinkedIn:** [Gabriel Steinberg](https://www.linkedin.com/in/gabriel-s-40186a155/)
 - **GitHub:** [@conectado](https://github.com/conectado)
 - **Location:** Buenos Aires, Argentina
+- **Blog:** [Taping Memory](https://taping-memory.dev/)
 
 ---
 
