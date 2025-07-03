@@ -1,3 +1,5 @@
+title = "Taping Memory"
+description = "A Rusty blog about Rusty things"
 base_url = "https://taping-memory.dev"
 compile_sass = true
 build_search_index = true
