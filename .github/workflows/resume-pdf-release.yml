@@ -11,7 +11,6 @@ on:
 # Add permissions for the GITHUB_TOKEN
 permissions:
   contents: write
-  releases: write
 
 jobs:
   build-and-release:
