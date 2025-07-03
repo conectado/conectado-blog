@@ -141,8 +141,6 @@ Let's begin with the beginning. The reference manual defines temporaries as:
 
 > When using a value expression in most place expression contexts, a temporary unnamed memory location is created and initialized to that value. The expression evaluates to that location instead, except if promoted to a static. The drop scope of the temporary is usually the end of the enclosing statement.
 
-![did you really think I was done with the memes?](/images/temporaries-rabbit-hole/memes/nerd.png)
-
 
 Okay, that definition is confusing, let's zoom in on the first part.
 
@@ -313,8 +311,6 @@ fn main() {
 }
 ```
 
-![pikachu.jpeg](/images/temporaries-rabbit-hole/memes/pikachu.png)
-
 ### Constant Promotion
 
 Very well, the definition of temporaries mentioned this:
@@ -418,9 +414,7 @@ fn main() {
 }
 ```
 
-*sigh*, I finally need to explain lifetime extension for temporaries.
-
-![why do I hear boss music?](/images/temporaries-rabbit-hole/memes/boss-music.png)
+Well... it's finally time we get into lifetime extension.
 
 ### Lifetime extension
 
@@ -512,10 +506,6 @@ There's some kind of a "recursive" behavior with this definition. The initialize
 For example, in `let x = Foo` the expression `Foo` is an extending expression, though no lifetime is extended because there's no borrow. In `let x = &Foo`, the expression `&Foo` is an extending expression, and `Foo`, being the operand of an extending borrow expression, has its lifetime extended, and it's also an extending expression.
 
 And for a more complicated case: `let x = &((), ((), &Foo));`, the expression `&((), ((), &Foo))` itself is an initializer expression, so the operand `((), ((), &Foo))` has its lifetime extended. This also means that `((), ((), &Foo))` is an extending expression. Which, in turn, means that each of the operands of the outer tuple are also extending expressions, in particular, `((), &Foo)` is an extending expression. Therefore, its operands are also extending, so `&Foo` is an extending expression. Then, since `Foo` is the operand of the extending expression, its temporary has its lifetime extended.
-
-Get it?!
-
-![Pepe Silvia](/images/temporaries-rabbit-hole/memes/pepesilvia.png)
 
 Note also that `Some(<expr>)` is a [call expression](https://doc.rust-lang.org/stable/reference/expressions/call-expr.html?highlight=call%20exp#call-expressions), which I will not get into[^3]. And the operands to call expressions are not mentioned in the types of extending expressions. Meaning that, while `Some(&Foo)` in `let x = Some(&Foo);` is an extending expression, `&Foo` isn't. Therefore, in that statement, there's no extending expression with a borrow, so no lifetime extension happens.
 
