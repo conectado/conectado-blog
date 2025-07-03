@@ -657,7 +657,7 @@ Since the line `let ref x = Foo(Bar).0;` doesn't copy `Bar`, but rather keeps a 
 
 Rejoice! You've gone through great trials and tribulations, and now you understand the magic of Rust temporaries.
 
-![Yorokobe Shounen](https://gist.github.com/user-attachments/assets/b57717e9-22b5-4461-a2ef-5777bab35f4d)
+![Yorokobe Shounen](/images/temporaries-rabbit-hole/memes/feelsgood.png)
 
 Normally, you don't need to understand this. When the compiler complains, you can just create a new binding and move on and ignore all this otherwise. But I, for one, believe that it's good to understand the specific conditions for the errors given by the compiler.
 
