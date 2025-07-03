@@ -8,6 +8,11 @@ on:
       - 'resume.md'  # Only triggers when resume.md changes
   workflow_dispatch:  # Allows manual triggering
 
+# Add permissions for the GITHUB_TOKEN
+permissions:
+  contents: write
+  releases: write
+
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
