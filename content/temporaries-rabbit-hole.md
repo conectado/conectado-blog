@@ -12,8 +12,6 @@ categories = ["rust", "deep dives"]
 toc = true
 +++
 
-# Introduction
-
 'twas a lovely Sunday afternoon when I decided to do some [fun rust quiz](https://dtolnay.github.io/rust-quiz/37),
 but a subtle mistake in the explanation of the answer ended up in hours of research
 and a PR.
