@@ -1,0 +1,26 @@
+base_url = "https://taping-memory.dev"
+compile_sass = true
+build_search_index = false
+theme = "radion"
+
+taxonomies = [
+    {name = "categories", feed = true},
+    {name = "tags", feed = true},
+]
+[markdown]
+highlight_code = true
+highlight_theme = "one-dark"
+insert_anchor_links = "heading"
+
+[extra]
+author = "conectado"
+github = "https://github.com/conectado"
+radion_menu = [
+    {url = "$BASE_URL/", name = "Home"},
+    {url = "$BASE_URL/categories", name = "Categories"},
+    {url = "$BASE_URL/tags", name = "Tags"},
+]
+codeblock = true
+radion_title = "Taping Memory"
+latex = true
+theme = "toggle"
