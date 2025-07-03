@@ -29,7 +29,7 @@ Currently working on networking infrastructure and VPN technology. Trying to be 
 - Bluesky: [@tapingmemory.bsky.social](https://bsky.app/profile/tapingmemory.bsky.social)
 - Email: [gabrielalejandro7@gmail.com](mailto:gabrielalejandro7@gmail.com)
 - [Linkedin](https://www.linkedin.com/in/gabriel-s-40186a155)
-- [Resume](./resume.md)
+- [Resume](https://taping-memory.dev/resume)
 ---
 
 Feel free to open issues for questions, corrections, or suggestions.
