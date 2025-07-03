@@ -25,7 +25,7 @@ jobs:
       with:
         args: >-
           resume.md
-          --output=resume.pdf
+          --output=gabriel-steinberg-rust-engineer-resume.pdf
           --pdf-engine=xelatex
           --variable=geometry:margin=0.75in
           --variable=fontsize:11pt
