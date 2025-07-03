@@ -154,7 +154,7 @@ The first thing to notice is that, under some condition — which we will explor
 
 So when an expression triggers the creation of a temporary, its value is placed there. What makes this memory location special is that it's unnamed, meaning that, in contrast to the memory location of a variable that's declared in a statement like `let x = ...`, there's no associated alias such as `x`.
 
-![temporaries](https://gist.github.com/user-attachments/assets/d8415684-5e19-46a6-919f-fa0b8bfc39f9)
+![temporaries](/images/temporaries-rabbit-hole/temporaries.png)
 
 Now let's explore what the conditions are that trigger the creation of a temporary.
 
@@ -329,7 +329,7 @@ So what does that mean? Again, going to [the reference](https://doc.rust-lang.or
 
 It's a bit wordy, so let's break it down. When a value expression is promoted, it means that instead of placing it into a temporary memory slot, it's stored in memory with a `'static` lifetime, like a `const` or `static` variable would be. So if something like `let x = Some(&Foo)` meets the const promotion condition, `&Foo` would return a reference to an `'static` memory location instead of a temporary memory location that would go out of scope at the end of the statement.
 
-![const promotion](https://gist.github.com/user-attachments/assets/ceb476b5-f5bc-4c9f-8278-99eaa80efb52)
+![const promotion](/images/temporaries-rabbit-hole/constpromotion.png)
 
 The condition for this to happen is that, at runtime, there's no change in behavior between returning the temporary memory location and borrowing and dereferencing the `'static` location in its place instead. Or to put it another way, we can replace the expression `<expr>` with the following program, without any change.
 
