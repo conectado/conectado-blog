@@ -1,0 +1,22 @@
+{% set image_meta = get_image_metadata(path=src) %}
+{% set original_width = image_meta.width %}
+
+{% set img_400 = resize_image(path=src, width=[400, original_width] | sort | first, op="fit_width", format="webp") %}
+{% set img_600 = resize_image(path=src, width=[600, original_width] | sort | first, op="fit_width", format="webp") %}
+{% set img_800 = resize_image(path=src, width=[800, original_width] | sort | first, op="fit_width", format="webp") %}
+
+{% if caption %}
+<figure class="image-figure">
+{% endif %}
+    <img 
+        src="{{img_400.url}}"
+        srcset="{{img_400.url}} 400w, {{img_600.url}} 600w, {{img_800.url}} 800w"
+        sizes="(width <= 800px) 100vw, 800px"
+        alt="{{ alt }}"
+        loading="lazy"
+        decoding="async"
+    >
+{% if caption %}
+    <figcaption>{{ caption }}</figcaption>
+</figure>
+{% endif %}
