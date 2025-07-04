@@ -18,13 +18,13 @@ and a PR.
 
 <!-- more -->
 
-And after learning so much about the niche Rust topic of temporaries, I'm determined to also burden you with this unholy knowledge, if you're just willing to read a few thousand words on it.
+After learning so much about the niche Rust topic of temporaries, I'm determined to also burden you with this unholy knowledge, if you're just willing to read a few thousand words on it.
 
 
 > **Spoiler alert!**
 >
-> While I'll not talk about the exact problem in [Quiz #37](https://dtolnay.github.io/rust-quiz/37)
-> I'll get pretty close to it. So you might want to try the quiz for yourself before.
+> While I won't talk about the exact problem in [Quiz #37](https://dtolnay.github.io/rust-quiz/37)
+> I'll get pretty close to it. So you might want to try the quiz for yourself beforehand.
 >
 > And if you want to know what used to be wrong about the explanation to that problem before [here's my PR](https://github.com/dtolnay/rust-quiz/pull/92)
 
@@ -36,7 +36,7 @@ If you've been programming in Rust for a while you must have seen this term used
 error[E0716]: temporary value dropped while borrowed
 ```
 
-So, what if I told you temporary values don't exists?
+So, what if I told you temporary values don't exist?
 
 {{ responsive_image(src="/images/temporaries-rabbit-hole/memes/morpheus.png", alt="Morpheus what if I told you meme") }}
 
@@ -45,9 +45,9 @@ Got your attention? Good.
 This is, of course, too clickbaity. It's just a mismatch between how the term is used by the compiler errors
 and how it's defined in the [reference](https://doc.rust-lang.org/stable/reference/expressions.html#r-expr.temporary).
 
-But don't worry about reading the reference just yet; we will untangle that definition in a moment, so now let's dive into it.
+But don't worry about reading the reference just yet; we will untangle that definition in a moment, so let's dive into it.
 
-## An incredibly deceptively simple example
+## An incredibly deceptively "simple" example
 
  Take a look at this example.
 
@@ -87,9 +87,9 @@ help: consider using a `let` binding to create a longer lived value
 For more information about this error, try `rustc --explain E0716`.
 ```
 
-Somehow, when we declare `Foo` in `let x = Some(&Foo)` there's really no variable to hold it. So, it's created temporarily, living only until the end of the `let` statement. After that, it's dropped, so when we try to invoke `x` again, it'd contain a dangling reference, so the compiler disallows it.
+Somehow, when we declare `Foo` in `let x = Some(&Foo)` there's really no variable to hold it. So, it's created temporarily, living only until the end of the `let` statement. After that, it's dropped, so when we try to invoke `x` again, the compiler disallows it, because it'd contain a dangling reference.
 
-Does this make sense? No? Kinda? Maybe we should just get the `Some` out of the way, it doesn't seem to be relevant for this discussion, and it shouldn't change anything.
+Does this make sense? No? Kinda? Maybe we should just get the `Some` out of the way, as it doesn't seem to be relevant for this discussion, and it shouldn't change anything.
 
 So now we can rewrite it like this.
 
@@ -109,9 +109,7 @@ fn main() {
 
 Now that we have less noise, the error is a bit clearer— wait, this compiles!
 
-
 {{ responsive_image(src="/images/temporaries-rabbit-hole/memes/what.gif", alt="huh??") }}
-
 
 Okay, okay, let's go back to the previous version, as it seems like there's no temporary value in this one.
 
@@ -134,13 +132,11 @@ Wait this compiles...
 
 Now I better tell you what's really going on here.
 
-
 ## What's going on
 
-Let's begin with the beginning. The reference manual defines temporaries as:
+Let's start at the beginning. The reference manual defines temporaries as:
 
 > When using a value expression in most place expression contexts, a temporary unnamed memory location is created and initialized to that value. The expression evaluates to that location instead, except if promoted to a static. The drop scope of the temporary is usually the end of the enclosing statement.
-
 
 Okay, that definition is confusing, let's zoom in on the first part.
 
@@ -152,18 +148,18 @@ So when an expression triggers the creation of a temporary, its value is placed 
 
 {{ responsive_image(src="/images/temporaries-rabbit-hole/temporaries.png", alt="temporaries") }}
 
-Now let's explore what the conditions are that trigger the creation of a temporary.
+Now let's explore what are the conditions that trigger the creation of a temporary.
 
 ## Value expressions and place expressions context
 
-In the definition, it mentions that a temporary is created when a **value expression** is put in a **place expression context**. To understand this, we must understand what value expressions, place expressions, and place expression context are. Luckily these are all defined in the [same section](https://doc.rust-lang.org/stable/reference/expressions.html#r-expr.place-value).
+In the definition, it's mentioned that a temporary is created when a **value expression** is put in a **place expression context**. To understand this, we must understand what value expressions, place expressions, and place expression contexts are. Luckily these are all defined in the [same section](https://doc.rust-lang.org/stable/reference/expressions.html#r-expr.place-value).
 
 First, let's look at the definition of a place expression.
 
 > A place expression is an expression that represents a memory location.
 > These expressions are paths which refer to local variables, static variables, dereferences (*expr), array indexing expressions (expr[expr]), field references (expr.f) and parenthesized place expressions.
 
-The key here is that a place expression represents a memory location. The simplest case given is a variable. For example, in the statement `let x = y;` if `y` is a local variable, it's a place expression. Another case is an expression involving the dereference operator (`*`), like `*x` in `if (*x + 2) > 0 {...}`. This makes sense since it should represent a value somewhere in memory that's being dereferenced; One important thing to notice is that while `*x` is a place expression, `(*x + 2)` isn't.
+The key here is that a place expression represents a memory location. The simplest case given is a variable. For example, in the statement `let x = y;` if `y` is a local variable, `y` corresponds to a place expression. Another case is an expression involving the dereference operator (`*`), like `*x` in `if (*x + 2) > 0 {...}`. This makes sense since `*x` should represent a value somewhere in memory that's being dereferenced; One important thing to notice is that while `*x` is a place expression, `(*x + 2)` isn't.
 
 And value expressions are everything else. Basically, expressions that represent an actual value, such as `1`, `x + 2`,  `"hello"`, `Vec::new()`, or `RangeFull`. Notice that a value expression can contain a place expression such as `*x + 2` but the expression itself still represents the value of the operation.
 
