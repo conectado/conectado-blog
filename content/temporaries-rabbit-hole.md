@@ -432,7 +432,7 @@ fn main() {
     x;
 }
 ```
-Aaand—this doesn't compiles (next time anyone tells you that `let x = <expr>` desugars to `let x; x = <expr>;` you're entitled to act smug about that being false).
+Aaand—this doesn't compile (next time anyone tells you that `let x = <expr>` desugars to `let x; x = <expr>;` you're entitled to act smug about that being false).
 
 This is the error for the program.
 
