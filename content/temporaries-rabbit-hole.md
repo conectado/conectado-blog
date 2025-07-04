@@ -264,7 +264,7 @@ fn main() {
 
 And the full error was 
 
-```rs
+```
 error[E0716]: temporary value dropped while borrowed
  --> src/main.rs:7:19
   |
@@ -302,7 +302,7 @@ Luckily, this case is not complicated. The initializer (the right-hand side) of 
 
 Okay, good, but then explain this! (It compiles)
 
-```
+```rs
 struct Foo;
 
 fn main() {
@@ -327,7 +327,7 @@ It's a bit wordy, so let's break it down. When a value expression is promoted, i
 
 The condition for this to happen is that, at runtime, there's no change in behavior between returning the temporary memory location and borrowing and dereferencing the `'static` location in its place instead. Or to put it another way, we can replace the expression `<expr>` with the following program, without any change.
 
-```rs
+```
 const P = <expr>;
 
 *&<expr>
@@ -432,11 +432,11 @@ fn main() {
     x;
 }
 ```
-Aaand—this compiles (next time anyone tells you that `let x = <expr>` desugars to `let x; x = <expr>;` you're entitled to act smug about that being false).
+Aaand—this doesn't compiles (next time anyone tells you that `let x = <expr>` desugars to `let x; x = <expr>;` you're entitled to act smug about that being false).
 
 This is the error for the program.
 
-```rs
+```
 error[E0716]: temporary value dropped while borrowed
  --> src/main.rs:8:10
   |
@@ -456,7 +456,7 @@ help: consider using a `let` binding to create a longer lived value
   
   Exactly what we would expect with the previous `Some` example. Then what?! Is there something special about initializers in `let` statements? Well... YES!
   
-If you paid attention to the definition of temporaries (very good! Here is your star ⭐), you might have noticed that it says that: "The drop scope of the temporary is usually the end of the enclosing statement," emphasis on the usually. Or more explicitly in the definition of the drop scope of a temporary: "*Apart from lifetime extension*, the temporary scope of an expression is the smallest scope that contains the expression [...]".
+If you paid attention to the definition of temporaries, you might have noticed that it says that: "The drop scope of the temporary is usually the end of the enclosing statement," emphasis on the usually. Or more explicitly in the definition of the drop scope of a temporary: "*Apart from lifetime extension*, the temporary scope of an expression is the smallest scope that contains the expression [...]".
 
 So what's going on? [Lifetime extensions](https://doc.rust-lang.org/stable/reference/destructors.html#r-destructors.scope.lifetime-extension) are an exception for the drop scope of temporaries:
 
