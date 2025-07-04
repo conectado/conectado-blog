@@ -38,7 +38,7 @@ error[E0716]: temporary value dropped while borrowed
 
 So, what if I told you temporary values don't exists?
 
-![Morpheus what if I told you meme](/images/temporaries-rabbit-hole/memes/morpheus.png)
+{{ responsive_image(src="/images/temporaries-rabbit-hole/memes/morpheus.png", alt="Morpheus what if I told you meme") }}
 
 Got your attention? Good.
 
@@ -110,7 +110,7 @@ fn main() {
 Now that we have less noise, the error is a bit clearer— wait, this compiles!
 
 
-![huh??](/images/temporaries-rabbit-hole/memes/what.gif)
+{{ responsive_image(src="/images/temporaries-rabbit-hole/memes/what.gif", alt="huh??") }}
 
 
 Okay, okay, let's go back to the previous version, as it seems like there's no temporary value in this one.
@@ -130,7 +130,7 @@ And the error was... wait, I forgot the `Drop` impl for `Foo`. Well, it shouldn'
 
 Wait this compiles...
 
-![go on....](/images/temporaries-rabbit-hole/memes/go-on.png)
+{{ responsive_image(src="/images/temporaries-rabbit-hole/memes/go-on.png", alt="go-on") }}
 
 Now I better tell you what's really going on here.
 
@@ -150,7 +150,7 @@ The first thing to notice is that, under some condition — which we will explor
 
 So when an expression triggers the creation of a temporary, its value is placed there. What makes this memory location special is that it's unnamed, meaning that, in contrast to the memory location of a variable that's declared in a statement like `let x = ...`, there's no associated alias such as `x`.
 
-![temporaries](/images/temporaries-rabbit-hole/temporaries.png)
+{{ responsive_image(src="/images/temporaries-rabbit-hole/temporaries.png", alt="temporaries") }}
 
 Now let's explore what the conditions are that trigger the creation of a temporary.
 
@@ -323,7 +323,7 @@ So what does that mean? Again, going to [the reference](https://doc.rust-lang.or
 
 It's a bit wordy, so let's break it down. When a value expression is promoted, it means that instead of placing it into a temporary memory slot, it's stored in memory with a `'static` lifetime, like a `const` or `static` variable would be. So if something like `let x = Some(&Foo)` meets the const promotion condition, `&Foo` would return a reference to an `'static` memory location instead of a temporary memory location that would go out of scope at the end of the statement.
 
-![const promotion](/images/temporaries-rabbit-hole/constpromotion.png)
+{{ responsive_image(src="/images/temporaries-rabbit-hole/constpromotion.png", alt="const promotion") }}
 
 The condition for this to happen is that, at runtime, there's no change in behavior between returning the temporary memory location and borrowing and dereferencing the `'static` location in its place instead. Or to put it another way, we can replace the expression `<expr>` with the following program, without any change.
 
@@ -645,7 +645,7 @@ Since the line `let ref x = Foo(Bar).0;` doesn't copy `Bar`, but rather keeps a 
 
 Rejoice! You've gone through great trials and tribulations, and now you understand the magic of Rust temporaries.
 
-![Yorokobe Shounen](/images/temporaries-rabbit-hole/memes/feelsgood.png)
+{{ responsive_image(src="/images/temporaries-rabbit-hole/memes/feelsgood.png", alt="Yorokobe Shounen") }}
 
 Normally, you don't need to understand this. When the compiler complains, you can just create a new binding and move on and ignore all this otherwise. But I, for one, believe that it's good to understand the specific conditions for the errors given by the compiler.
 
