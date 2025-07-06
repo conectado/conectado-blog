@@ -14,6 +14,7 @@ This is my technical blog, where I write, mostly about rust.
 These are small things I write just to keep in the habit of writing. They lack polished.
 
 * [Unexpected(for me) behavior in drop order](https://gist.github.com/conectado/25076d49734e692e51b7c5b4f2d3d7ff)
+* [Method call resolution in Rust for type parameters](https://gist.github.com/conectado/7b5ce76abb325de7a56a0c8a428bc125)
 
 ---
 
