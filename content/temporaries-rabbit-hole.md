@@ -1,7 +1,7 @@
 +++
 title = "The scary and surprisingly deep rabbit hole of Rust's temporaries"
 description = "Way too many words about how Rust's temporaries work"
-date = 2025-06-03
+date = 2025-07-02
 draft = false
 
 [taxonomies]
