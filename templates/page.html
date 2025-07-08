@@ -1,5 +1,9 @@
 {% extends "radion/templates/page.html" %}
 
+{% block extra_footer %}
+<p>Blog's theme is <a href="https://github.com/micahkepe/radion" target="_blank" rel="noopener noreferrer">Radion</a> by <a href="https://micahkepe.com/" target="_blank" rel="noopener noreferrer">Micah Kepe</a> powered by <a href="https://getzola.org" target="_blank" rel="noopener noreferrer">Zola</a></p>
+{% endblock extra_footer %}
+
 {% block scripts %}
 {{ super() }}
 <style>
