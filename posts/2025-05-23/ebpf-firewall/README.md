@@ -521,12 +521,12 @@ And most importantly, we lookup in the rulestore if the `port` that arrived exis
         if left == 0 {
             false
         } else {
-            let indx = left - 1;
-            if indx >= MAX_RULES {
+            let index = left - 1;
+            if index >= MAX_RULES {
                 return false;
             }
             // SAFETY: Again, we are already bound checking
-            end(*unsafe { self.rules.get_unchecked(indx) }) >= val
+            end(*unsafe { self.rules.get_unchecked(index) }) >= val
         }
     }
 ```
