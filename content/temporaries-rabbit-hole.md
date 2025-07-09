@@ -223,7 +223,7 @@ So, the question is, how temporary is a temporary really? That's to say, we have
 
 ## Temporaries' lifetimes
 
-Now we have the neccesary definitions to talk about what makes temporaries temporary. Well, not exactly, temporaries are just temporaries because they are anonymous, meaning there's no alias associated with that memory location. It has nothing to do with their lifetime. But you could ask, since there's no associated alias, then what's their lifetime? And you would be asking all the right questions.
+Now we have the necessary definitions to talk about what makes temporaries temporary. Well, not exactly, temporaries are just temporaries because they are anonymous, meaning there's no alias associated with that memory location. It has nothing to do with their lifetime. But you could ask, since there's no associated alias, then what's their lifetime? And you would be asking all the right questions.
 
 Let's go to the relevant part of the definition of a temporary.
 
