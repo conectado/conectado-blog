@@ -14,4 +14,6 @@ jobs:
       - name: Run Codespell
         uses: codespell-project/actions-codespell@v2
         with:
-          codespell_args: "--ignore-words .codespell-ignore --skip *.svg"
+          check_filenames: true
+          ignore_words_file: .codespellignore
+          skip: *.svg
