@@ -12,52 +12,42 @@ categories = ["rust", "deep dives"]
 toc = true
 +++
 
-## Introduction
 
-Correctly sharing mutable state in Rust is difficult. To achieve this, we normally use either mutexes or channels. I want to propose an alternative, the **reactor pattern**.
+Correctly sharing mutable state in concurrent Rust code is difficult. To achieve this, we normally use either mutexes or channels. I want to propose an alternative, the **reactor pattern**.
 
-The reactor pattern is *old*, and it's *widely* used. In fact, it's what `tokio` and most other runtimes use under the hood to implement the executor model.
-What I want to bring to the table is the idea that it's good to use it as application code, even in contexts where you have an async framework.
-
-In this article I'll present a simple example of a network application and evolve it with each of these patterns. So that we can discuss the trade-offs of these different implementations, and you can consider them to take a decision on what fits best for your application.
+In this article I'll present a simple example of a network application and evolve it with each of these patterns. We'll use this example to consider the trade-offs between these alternatives.
 
 <!-- more -->
 
-In Rust it can be even more frustrating, in an effort to prevent you from shooting yourself in the foot it enforces XOR-aliasing rules that prevents simply sharing `&mut` references between tasks, additional safety mechanisms require tasks to be `'Send` and `'static`.
-
-This does prevent a lot of bugs and UB but you can still be left in a very poor situation, due to deadlocks that can't be prevented by the borrow checker of forcing extra copies and/or allocations.
-
-This is not to say that Rust's approach is bad or even misguided, on the contrary it's my favored approach, but I believe the key to untangle the potential mess of managing state in these situations is intelligently modelling the I/O resources of your application.
-
-As the last sentence suggest I'll be focusing on I/O-bound applications, and that's in fact the case, I'll not focus on CPU-bound task that need to execute parallely.
-
-What I'll try to focus on is the reactor pattern, showing how it can prevent some of the pain points of other common approaches in Rust.
-
-In order to show this I introduce a simple example that we will evolve with different modeling techniques for I/O concurrent code. It will give us some context to discuss the benefits and drawbacks of each of these patterns.
-
 ## Motivation
 
-More often than not, when writing async code in Rust you are dealing with IO-bound tasks; Tasks which spend most of its execution time waiting for I/O instead of running in the CPU. 
 
-![Structure of an IO-bound task](io-bound-task.png)
+This post is specifically about sharing mutable state in async. Most async applications are IO-bound, and benefit for the most part from concurrency, meaning tasks don't block the execution of the rest of the program while waiting for an IO event to occur.
+The most common way to achieve this in an async runtime is to spawn a `Task`, which is a primitive provided by the async runtime that represents a unit of work. This unit of work can then be scheduled to work, on this thread or another, as IO events unblock it, concurrently with other `Task`s.
 
-`await` is the way to signal the compiler the point where you want to suspend execution until that IO-event happen. The goal is that tasks can collaboratively share CPU resources with other tasks, so that they can continue work, while suspended.
+There's a price to pay for that convenience; any `Future` that `Task` is meant to execute must be `'static` and possibly `'Send`. For the latter, `'Send`, it's only a requirement if it's actually executed in multiple threads.
+This can be achieved by using constructs like `tokio::task::LocalSet`; it can be a bit unwieldy, but it'll get rid of the `'Send` requirement. However, `'static` is a much harder requirement to get rid of.
 
-IO-bound apps which are mostly composed of IO-bound tasks benefit greatly from this, otherwise, at any point where the application would need to wait for an IO-event it'd prevent the whole thread from doing any more work.
+`'static` is a requirement because the spawned `Future` can be run at any later time, even outliving the scope of the block that originally spawned it. There are two ways to meet this requirement and have a mutable state: either use a structure with internal mutability to store state, or have single ownership of the different pieces of state in different tasks and coordinate between them using channels.
 
-<!-- Diagram here on how tasks share execution-->
+Another option could be to stop using `spawn` altogether and instead try to run all the futures in tasks. There are functions like `futures::future::select`, `futures::future::select_all`, or `tokio::select`. As these don't require `'static`.
+Still, the `Future`s are themselves multiple units of work that exist at the same time; they can't share mutable state. For that you need structures with internal mutation.
 
-Since calling `await` suspends the execution of a task you need to spawn a new one to allow other work to continue, the new task can outlive the spawnee so it requires the spawned future to be `'static`.
+However, if we could segregate the IO futures from the state mutation, we could potentially have futures with no references to the shared state and a common block for handling the IO event for the future. That's the idea behind the reactor pattern.
 
-This means, as I mentioned before, that you can't hold an `&mut` reference to the state in your new task. Even if you use a `LocalSet` the `'static` requirement is still there. This means to share mutable state you need to either use `Mutex` or a `channel`.
+The idea is you can wait for any IO event to happen, and when an event occurs, you get a descriptor of the event and can just handle it, having an `&mut` reference to state. But this can be taken a step further.
 
-We will explore the limitations of these two approaches in the next sections. 
+Normally, calling `.await` in an `async` function schedules a `Waker` associated with a task to be woken at some point in the future. The compiler automatically keeps track of the state of the future by generating an enum that represents the `await` point and keeps the state stored.
+Notice that this coupling only exists so that the task can resume execution at the same point; we could structure our code so that each time the task is woken, we try to sequentially advance work on all our IO and poll all our IO for new events. That way, all IO can also share references to mutable state.
+It's okay if this is a bit confusing right now; it will become quite clearer once we move into the concrete examples.
 
-Yet, if we could wait concurrently for IO-events in a single task, we could run the whole IO-bound app in that task. That's the idea behind the reactor pattern. 
+This is another approach to the reactor pattern with its own trade-offs that we will also discuss.
 
-There are some limitations and drawbacks to this approach which we will discuss it in later sections. However, the benefit in having all IO share a single task it that you can have `&mut` access to the state without any syncronization mechanism.
+The first version of the reactor pattern I mentioned probably rings familiar to anyone who has been working with async Rust code. A loop that selects between multiple futures is a common pattern, and that's indeed the reactor pattern in use, but the key is that we can architect the whole program around this without spawning any task. 
 
-So my idea, with the following example is to evolve it with the different more common synchronization mechanisms used in Rust. To show how they contrast with the reactor pattern and give you the tools to decide which will be best for your particular case.
+In fact, the reactor pattern is what `tokio` and most other runtimes use under the hood to implement their execution engine. But we can go beyond that and use the pattern even in application-level contexts where you have an async runtime.
+
+To show this, I introduce a simple example that we will evolve with different modeling techniques for I/O concurrent code. It will give us some context to discuss the benefits and drawbacks of each of these patterns.
 
 ## The toy problem
 
