@@ -1,6 +1,6 @@
 +++
 title = "Reactor pattern as an application-level pattern in Rust"
-description = "Comparision of patterns for sharing mutable state in concurrent applications, and a case for the reactor pattern"
+description = "Comparison of patterns for sharing mutable state in concurrent applications, and a case for the reactor pattern"
 date = 2025-07-04
 draft = false
 
