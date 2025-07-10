@@ -86,9 +86,9 @@ This protocol could cause the clients to receive segmented messages from differe
 
 ## Tests
 
-First, let's write some test to get a feeling of how the protocol should behave. We're just writing something simple to set expectations and exemplify how this should work, not a way to catch edge cases.
+First, let's write a test to get a feeling of how the protocol should behave. Note that this isn't done to catch edge cases, only to encode a few key expectations.
 
-For our first implementation the interface for the protocol will be:
+The interface for the server will be this. 
 
 ```rs
 struct Server;
@@ -99,11 +99,9 @@ impl Server {
 }
 ```
 
-> [!TIP]
-> The signature of `Server::handle_connections` will change slightly to use `&mut self` in some future sections, but updating the tests is trivial.
-> Anyways, there will be a full implementation including test for each of the examples.
+{{ note(body="The signature of `Server::handle_connections` will change slightly to use `&mut self` in a later section, but updating the tests is trivial. Anyways, there will be a full implementation, including a test for each of the examples.", header="Tip") }}
 
-So our basic test will be this:
+With that in mind, we can write this test.
 
 ```rs
 #[cfg(test)]
@@ -156,9 +154,9 @@ mod tests {
 Simply put:
 
 1. We start the server in the background.
-1. Create to sockets and connect each to the router getting the ids in response.
-1. Send a message from one socket to the other comforming to the previously laid out protocol.
-1. Assert that we got the verbatim message on the other end.
+1. Create two sockets and connect each to the router, getting the IDs in response.
+1. Send a message from one socket to the other conforming to the previously laid out protocol.
+1. Assert that each client can get a message from the other.
 
 ## Implementations
 
@@ -306,14 +304,14 @@ For anyone familiar with async coding in Rust this is expected, particularly, wh
 * [Tokio's Shared State docs](https://tokio.rs/tokio/tutorial/shared-state)
 * [Alice Rhyl's Shared mutable state in Rust](https://draft.ryhl.io/blog/shared-mutable-state/)
 
-### CSP-style (Actor model)
+### Channels
 
 > [!NOTE]
-> The code for this section can be found in the [csp](./csp) directory.
+> The code for this section can be found in the [channels](./channels) directory.
 
 So the classic way to avoid this pitfall is to use channels.
 
-There are actually 2 patterns that use the channel primitive, CSP-style and actor model. The differences are subtle and they are not the focus of this article.
+There are actually 2 patterns that use the channel primitive. The differences are subtle and they are not the focus of this article.
 
 Instead of having a mutex to share state among connections, we have a single task that manages the state, therefore a Mutex isn't needed, instead we use a channel to send messages to that task.
 
@@ -431,7 +429,7 @@ enum Message {
 ```
 
 > [!NOTE]
-> The full code for this version can be found in the [csp-channel-per-writer](./csp-channel-per-writer) directory.
+> The full code for this version can be found in the [channel-per-writer](./channel-per-writer) directory.
 
 This is a bit better, channel's `send` with complete immediatley except when the channel is full. But it still has some drawbacks.
 
