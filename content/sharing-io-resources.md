@@ -21,7 +21,6 @@ In this article I'll present a simple example of a network application and evolv
 
 ## Motivation
 
-
 This post is specifically about sharing mutable state in async. Most async applications are IO-bound, and benefit for the most part from concurrency, meaning tasks don't block the execution of the rest of the program while waiting for an IO event to occur.
 The most common way to achieve this in an async runtime is to spawn a `Task`, which is a primitive provided by the async runtime that represents a unit of work. This unit of work can then be scheduled to work, on this thread or another, as IO events unblock it, concurrently with other `Task`s.
 
@@ -51,40 +50,39 @@ To show this, I introduce a simple example that we will evolve with different mo
 
 ## The toy problem
 
-This is a small and simplified, yet almost realistic, scenario. I'll pick some artificial constraints just to save us from some error handling and a few lines of code so we can focus on the core of the issue, namely, sharing mutable state across IO events.
+This is a small and simplified, yet almost realistic, scenario. I've picked some artificial constraints just to save us from some error handling and a few extra code paths. This way we can focus on the core of the issue, namely, sharing mutable state in concurrent code.
 
-> [!NOTE]
-> All the numbers are sent in the wire in network-order.
+We will be writing a server that clients can connect to and subsequently exchange messages between them through it.
 
-We will be writing a server that clients can connect to and subsequently exchange messages between them, through it.
+{{ note(body="All numbers in the wire are encoded in network-order.") }}
 
 <!-- Diagram of the problem -->
 
-Clients will connect over a TCP socket to the server, and they will immediatley be assigned an id, which will be sent as a 4 bytes response.
+Clients will connect to the server over a TCP socket, then they will immediately be assigned an id, which will be sent back as a 4-byte response.
 
 <!-- Diagram of the ID message -->
 
-The clients can exchange the ID over a side channel, and then use it to craft messages directed to other clients.
+The clients can exchange this ID over a side channel, then use the other client's ID to craft a message to be forwarded by the server to the client with that assigned ID.
 
 <!-- Diagram of the Message -->
 
-They can do this by sending the id to the server, followed by a nul-terminated stream of bytes.
+The crafted message is composed of the other receiving client's ID followed by a nul-terminated stream of bytes.
 
-The server, once a complete message is read will forward the bytes to the corresponding peer, without including its ID. 
+Once a complete message is read by the server, it will forward the nul-terminated stream of bytes to the corresponding peer, without including the ID header. 
 
 <!-- Full sequence diagram -->
 
 We will assume these unrealistic simplifications.
 
-* Every client is well-behaved and will never abuse the protocol
-  * This also means clients will always send complete messages and won't start a new one without finishing the one before
-  * Every message the client send conform to the protocol and the id of the client it wants to communicate with is always valid.
-* There are no OS errors
-* Once a client connects it never disconnects
-* A client will never sends a message to itself
-* The Server once started will never stop
+* Every client is well-behaved and will never abuse the protocol.
+  * This means clients will always send complete messages and won't start a new one without finishing the one before.
+  * Every message a client sends follows the protocol, and the message always starts with the 4-byte ID of an existing client.
+* OS errors never happen.
+* Once a client connects, it never disconnects.
+* A client will never send a message to itself.
+* Once started, a server will never stop.
 
-This protocol could cause the clients to recieve segmented messages from different clients without the possibility to distinguish between them but let's ignore that too.
+This protocol could cause the clients to receive segmented messages from different clients without the possibility to distinguish between them, but let's ignore that too.
 
 ## Tests
 
