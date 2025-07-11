@@ -1,18 +1,17 @@
 use bytes::Bytes;
 use bytes::BytesMut;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::LocalSet;
 #[tokio::main]
 async fn main() {
-    let router = Arc::new(Server::new().await);
+    let mut router = Server::new().await;
     router.handle_connections().await;
 }
 
 struct Server {
     listener: TcpListener,
-    connections: tokio::sync::Mutex<Vec<OwnedWriteHalf>>,
+    connections: Vec<TcpStream>,
 }
 
 impl Server {
@@ -24,39 +23,34 @@ impl Server {
         }
     }
 
-    pub async fn handle_connections(self: Arc<Self>) {
+    pub async fn handle_connections(&mut self) {
+        let local = LocalSet::new();
         loop {
             let (socket, _) = self.listener.accept().await.unwrap();
-            let router = self.clone();
 
-            tokio::spawn(async move {
-                router.handle_connection(socket).await;
+            local.spawn_local(async move {
+                self.handle_connection(socket).await;
             });
         }
     }
 
-    async fn handle_connection(&self, socket: TcpStream) {
-        let (mut read, mut write) = socket.into_split();
-        {
-            let mut connections = self.connections.lock().await;
-            let id = connections.len();
-            write.write_u32(id as u32).await.unwrap();
-            write.flush().await.unwrap();
-            connections.push(write);
-        }
+    async fn handle_connection(&mut self, mut socket: TcpStream) {
+        let id = self.connections.len();
+        socket.write_u32(id as u32).await.unwrap();
+        socket.flush().await.unwrap();
+        self.connections.push(socket);
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = read.read_buf(&mut buffer).await.unwrap();
+            let n = self.connections[id].read_buf(&mut buffer).await.unwrap();
             assert!(n != 0);
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
             };
 
-            let mut connections = self.connections.lock().await;
-            connections[dest as usize].write_all(&m).await.unwrap();
+            self.connections[dest as usize].write_all(&m).await.unwrap();
         }
     }
 }

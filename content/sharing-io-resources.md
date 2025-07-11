@@ -84,6 +84,14 @@ We will assume these unrealistic simplifications.
 
 This protocol could cause the clients to receive segmented messages from different clients without the possibility to distinguish between them, but let's ignore that too.
 
+## Implementations
+
+We can easily identify that we need some kind of concurrency to react either to a message from any client or a new TCP connection.
+
+This can be done with threads, manually with OS functions, or with an async runtime. Since we are writing an IO-bound application, we will go for an async runtime, `tokio` in this case.
+
+Having established that, let's move on to the details.
+
 ## Tests
 
 First, let's write a test to get a feeling of how the protocol should behave. Note that this isn't done to catch edge cases, only to encode a few key expectations.
@@ -158,14 +166,100 @@ Simply put:
 1. Send a message from one socket to the other conforming to the previously laid out protocol.
 1. Assert that each client can get a message from the other.
 
-## Implementations
+Before moving on to the specifics, we'll move on to a common parsing function used by all implementations.
+
+### Message parsing
+
+We will use the `bytes` crate as it'll allow us to manipulate the messages with less copying, and although it'll not be our focus, I want to discuss some points on copying.
+
+This function will work by taking the bytes of the incoming message and trying to parse them according to the protocol.
+If successful, it'll return a tuple of `(<id>, <bytes>)` with the bytes for the message with the intended recipient, consuming the bytes corresponding to the message from the original buffer. Otherwise, it'll return an error and leave the original buffer intact. It will only parse a single message at a time. 
+
+```rs
+struct ParseError;
+
+fn parse_message(message: &mut BytesMut) -> Result<(u32, Bytes), ParseError> {
+    if message.len() < 5 {
+        return Err(ParseError);
+    }
+
+    let end = message[4..]
+        .iter()
+        .position(|&c| c == b'\0')
+        .ok_or(ParseError)?
+        + 5;
+
+    let mut data = message.split_to(end);
+
+    let dest = data.split_to(4);
+    let dest = u32::from_be_bytes(dest[..].try_into().unwrap());
+
+    Ok((dest, data.freeze()))
+}
+```
+
+The function is quite simple; the implementation details are unimportant for the rest of the examples.
+
+Now let's go to the first implementation using `Mutex` to shared the sockets.
 
 ### Mutex
 
-> [!NOTE]
-> The code for this example can be found in the [mutex](./mutex) directory
+{{ note(body="The code for this example can be found in the [mutex](./mutex) directory") }}
+
+If one might, naively, try to implement the `handle_connections` without any synchronization, like this.
+
+```rs,lineno
+struct Server {
+    listener: TcpListener,
+    connections: Vec<TcpStream>,
+}
+
+impl Server {
+    pub async fn new() -> Server {
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        Server {
+            listener,
+            connections: Default::default(),
+        }
+    }
+
+    pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        loop {
+            let (socket, _) = self.listener.accept().await.unwrap();
+            let router = self.clone();
+
+            tokio::spawn(async move {
+                router.handle_connection(socket).await;
+            });
+        }
+    }
+
+    async fn handle_connection(&mut self, mut socket: TcpStream) {
+        let id = self.connections.len();
+        socket.write_u32(id as u32).await.unwrap();
+        socket.flush().await.unwrap();
+        self.connections.push(socket);
+
+        let mut buffer = BytesMut::new();
+
+        loop {
+            let n = self.connections[id].read_buf(&mut buffer).await.unwrap();
+            assert!(n != 0);
+
+            let Ok((dest, m)) = parse_message(&mut buffer) else {
+                continue;
+            };
+
+            self.connections[dest as usize].write_all(&m).await.unwrap();
+        }
+    }
+}
+```
+
+To realize quickly
 
 A first approach one can make is using `Mutex` and it looks a bit like this:
+
 
 ```rs
 

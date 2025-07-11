@@ -132,11 +132,12 @@ fn parse_message(message: &mut BytesMut) -> Result<(u32, Bytes), ParseError> {
         .ok_or(ParseError)?
         + 5;
 
-    let dest: u32 = u32::from_be_bytes(message[..4].try_into().unwrap());
+    let mut data = message.split_to(end);
 
-    let data = message.split_to(end).split_off(4).freeze();
+    let dest = data.split_to(4);
+    let dest = u32::from_be_bytes(dest[..].try_into().unwrap());
 
-    Ok((dest, data))
+    Ok((dest, data.freeze()))
 }
 
 #[cfg(test)]
