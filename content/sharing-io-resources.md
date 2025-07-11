@@ -1,5 +1,5 @@
 +++
-title = "Reactor pattern as an application-level pattern in Rust"
+title = "Sharing state in async code by using the reactor pattern"
 description = "Comparison of patterns for sharing mutable state in concurrent applications, and a case for the reactor pattern"
 date = 2025-07-04
 draft = false
@@ -15,22 +15,23 @@ toc = true
 
 Correctly sharing mutable state in concurrent Rust code is difficult. To achieve this, we normally use either mutexes or channels. I want to propose an alternative, the **reactor pattern**.
 
-In this article I'll present a simple example of a network application and evolve it with each of these patterns. We'll use this example to consider the trade-offs between these alternatives.
+In this article I'll present a simple example of a network application, and progressively apply these patterns, in order to consider their trade-offs, showing you how the reactor pattern allows you to share mutable state in a straightforward manner.
 
 <!-- more -->
 
 ## Motivation
 
-This post is specifically about sharing mutable state in async. Most async applications are IO-bound, and benefit for the most part from concurrency, meaning tasks don't block the execution of the rest of the program while waiting for an IO event to occur.
-The most common way to achieve this in an async runtime is to spawn a `Task`, which is a primitive provided by the async runtime that represents a unit of work. This unit of work can then be scheduled to work, on this thread or another, as IO events unblock it, concurrently with other `Task`s.
+This post is specifically about sharing mutable state in IO-bound applications. These kinds of applications benefit heavily from concurrency, meaning that tasks don't block the execution of the rest of the program while waiting for IO events to occur. To deal with this, we normally use async runtimes, and that's what I'll focus on.
 
-There's a price to pay for that convenience; any `Future` that `Task` is meant to execute must be `'static` and possibly `'Send`. For the latter, `'Send`, it's only a requirement if it's actually executed in multiple threads.
-This can be achieved by using constructs like `tokio::task::LocalSet`; it can be a bit unwieldy, but it'll get rid of the `'Send` requirement. However, `'static` is a much harder requirement to get rid of.
+The most common way to achieve concurrency in an async runtime is to spawn new `Task`s to handle IO events. `Task` is a primitive provided by the async runtime that represents a unit of work. As IO events unblock this unit of work, it can then be scheduled on this thread or another to run concurrently with other `Task`s.
 
-`'static` is a requirement because the spawned `Future` can be run at any later time, even outliving the scope of the block that originally spawned it. There are two ways to meet this requirement and have a mutable state: either use a structure with internal mutability to store state, or have single ownership of the different pieces of state in different tasks and coordinate between them using channels.
+There's a price to pay for that convenience; any `Future` that `Task` is meant to execute must be `'static` and possibly `'Send`. For the latter, it's only a requirement if it can be scheduled in different threads.
+This can be prevented by using constructs like `tokio::task::LocalSet`, although it can be a bit unwieldy, it will get rid of the `'Send` requirement. However, `'static` is a much harder requirement to get rid of.
 
-Another option could be to stop using `spawn` altogether and instead try to run all the futures in tasks. There are functions like `futures::future::select`, `futures::future::select_all`, or `tokio::select`. As these don't require `'static`.
-Still, the `Future`s are themselves multiple units of work that exist at the same time; they can't share mutable state. For that you need structures with internal mutation.
+`'static` is a requirement because the spawned `Future` can be run at any later time, even outliving the scope of the block that originally spawned it. There are two ways to meet this requirement and have a mutable state: either by using a structure with internal mutability to store state, or by having single ownership of the different pieces of state in different tasks and coordinating between them using channels.
+
+Another option could be to stop using `spawn` altogether and instead try to run all the futures in a single task. To achieve this there are functions available like `futures::future::select`, `futures::future::select_all`, or `tokio::select`, which indeed don't require `'static`.
+Still, the `Future`s are themselves multiple units of work that exist at the same time; they can't share `&mut` references to the state. For that, again, you need structures with internal mutation.
 
 However, if we could segregate the IO futures from the state mutation, we could potentially have futures with no references to the shared state and a common block for handling the IO event for the future. That's the idea behind the reactor pattern.
 
