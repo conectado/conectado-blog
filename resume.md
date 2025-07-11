@@ -22,7 +22,7 @@ Specializing in low-level programming, network protocols, and cross-platform sys
 
 ---
 
-## Technical Skills
+## Skills
 
 ### Programming Languages
 - **Expert:** Rust
@@ -40,7 +40,7 @@ Specializing in low-level programming, network protocols, and cross-platform sys
 
 ---
 
-## Professional Experience
+## Experience
 
 ### Senior Backend Engineer | Firezone
 **May 2022 - Present | Fully Remote**
@@ -82,13 +82,23 @@ Led development teams of 3-4 developers on high-impact client projects including
 
 ---
 
+## Projects
+
+### Articles
+
+- [Rust's temporaries deepdive](https://taping-memory.dev/temporaries-rabbit-hole/)
+- [Method call resolution in Rust](https://taping-memory.dev/writeups/method-resolution/)
+
+### Repos
+
+- [Firezone](https://github.com/firezone/firezone)
+- [eBPF firewall(WIP)](https://github.com/conectado/ebpf-firewall)
+
+---
+
 ## Education
 
-### Licentiate in Computer Science | University of Buenos Aires (UBA)
-**2012 - (Dropped Out) | Buenos Aires, Argentina**
-
-### Licentiate in Physics | University of Buenos Aires (UBA)  
-**2012 - (Dropped Out) | Buenos Aires, Argentina**
+### Coursework in Computer Science and Physics | University of Buenos Aires (UBA)
 
 ### Technical School with ICT Orientation | ORT
 **2006 - 2011 | Buenos Aires, Argentina**
