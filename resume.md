@@ -22,6 +22,15 @@ Specializing in low-level programming, network protocols, and cross-platform sys
 
 ---
 
+## Key Achievements
+
+- Successfully architected and implemented production-grade Zero Trust networking solutions
+- Led architectural migrations improving system performance and reliability
+- Built secure, high-performance blockchain infrastructure handling financial transactions
+- Contributed to enterprise security tools used by cybersecurity professionals worldwide
+
+---
+
 ## Skills
 
 ### Programming Languages
@@ -111,12 +120,3 @@ Led development teams of 3-4 developers on high-impact client projects including
 - **Network Engineering:** Protocol implementation, network programming, performance optimization
 - **Emerging Technologies:** Machine learning, functional programming, graphics programming
 - **Security:** Zero Trust architecture, cryptographic protocols, secure system design
-
----
-
-## Key Achievements
-
-- Successfully architected and implemented production-grade Zero Trust networking solutions
-- Led architectural migrations improving system performance and reliability
-- Built secure, high-performance blockchain infrastructure handling financial transactions
-- Contributed to enterprise security tools used by cybersecurity professionals worldwide
