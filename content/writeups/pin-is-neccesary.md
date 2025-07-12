@@ -29,7 +29,7 @@ Everything looks nice except for that `Pin::new_unchecked` which we created with
 
 I've read a lot about how `async` creates internal state machines that keep self-referential structs that, if moved, everything could be disastrous.
 
-But how does this look? How can we fail to enforce the safety requirements of `Pin`, specifically, with futues? Let's see what happens if you move a pinned value after it's created and polled!
+But how does this look? How can we fail to enforce the safety requirements of `Pin`, specifically, with futures? Let's see what happens if you move a pinned value after it's created and polled!
 
 Now let's rewrite this in the following way.
 
