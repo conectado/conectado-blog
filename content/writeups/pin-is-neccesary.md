@@ -8,7 +8,6 @@ draft = false
 So, let's say you have a clean and nice function like this.
 
 ```rs
-use std::future::poll_fn;
 use std::pin::Pin;
 async fn foo() -> u32 {
     let mut x = 1;
@@ -20,7 +19,7 @@ async fn foo() -> u32 {
 #[tokio::main]
 async fn main() {
     let mut x = foo();
-    let mut a = unsafe { Pin::new_unchecked(&mut x) };
+    let a = unsafe { Pin::new_unchecked(&mut x) };
     
     println!("{}", a.await);
 }
