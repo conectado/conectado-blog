@@ -207,9 +207,9 @@ Now let's go to the first implementation using `Mutex` to shared the sockets.
 
 {{ note(body="The code for this example can be found in the [mutex](./mutex) directory") }}
 
-If one might, naively, try to implement the `handle_connections` without any synchronization, like this.
+If tries to implement the `handle_connections` naively without any synchronization, like this.
 
-```rs,lineno
+```rs,linenos,hl_lines=20
 struct Server {
     listener: TcpListener,
     connections: Vec<TcpStream>,
@@ -224,13 +224,12 @@ impl Server {
         }
     }
 
-    pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub async fn handle_connections(&mut self) {
         loop {
             let (socket, _) = self.listener.accept().await.unwrap();
-            let router = self.clone();
 
             tokio::spawn(async move {
-                router.handle_connection(socket).await;
+                self.handle_connection(socket).await;
             });
         }
     }
@@ -257,36 +256,102 @@ impl Server {
 }
 ```
 
-To realize quickly
+The compiler is quick to point out that in line 21 `self` is borrowed data for a `'static` lifetime, which escapes the scope of `handle_connection`. Furthermore, in line 18, `self` is used after being moved.
 
-A first approach one can make is using `Mutex` and it looks a bit like this:
+This means we need both multi-thread reference counting and internal-mutability so `Arc<Mutex<T>>` it is.
+
+There're a few ways to implement this, we can just wrap `connections` or the whole struct.
+I'll just use an `Arc` for the whole struct, so we can move `self` and a `Mutex` on connections
+
+If one tries to do this with a conventional `std::sync::Mutex` the compiler will disallow it. Because we need to hold the lock while we send a message, we need to use tokio mutex.
+
+But, again, a naive implementation like this will result in problems.
+
+```rs,linenos,hl_lines=27,hl_lines=35,hl_lines=45
+struct Server {
+    listener: TcpListener,
+    connections: tokio::sync::Mutex<Vec<TcpStream>>,
+}
+
+impl Server {
+    pub async fn new() -> Server {
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        Server {
+            listener,
+            connections: Default::default(),
+        }
+    }
+
+    pub async fn handle_connections(self: Arc<Self>) {
+        loop {
+            let (socket, _) = self.listener.accept().await.unwrap();
+            let router = Arc::clone(&self);
+
+            tokio::spawn(async move {
+                router.handle_connection(socket).await;
+            });
+        }
+    }
+
+    async fn handle_connection(&self, mut socket: TcpStream) {
+        let id = self.connections.lock().await.len();
+        socket.write_u32(id as u32).await.unwrap();
+        socket.flush().await.unwrap();
+        self.connections.lock().await.push(socket);
+
+        let mut buffer = BytesMut::new();
+
+        loop {
+            let n = self.connections.lock().await[id]
+                .read_buf(&mut buffer)
+                .await
+                .unwrap();
+            assert!(n != 0);
+
+            let Ok((dest, m)) = parse_message(&mut buffer) else {
+                continue;
+            };
+
+            self.connections.lock().await[dest as usize]
+                .write_all(&m)
+                .await
+                .unwrap();
+        }
+    }
+}
+```
+
+If you run `cargo test` here, this will simply deadlock. On line 35 the client will grab the lock and hold it until a message is received. For our test, the first client doesn't send a message until it recieves the id from the second client. And the second client can't get the id until it obtains the lock. So a deadlock.
+
+We could try to fix this by using a different id scheme, or holding the number of clients in a different variable. But this won't do, on line 35 we hold the mutex for all clients, so any client can prevent any other 2 clients for an arbitrarily long time.
+
+Instead, the more correct implementation will look like this.
 
 
 ```rs
-
-#[derive(Default)]
-struct Router {
+struct Server {
+    listener: TcpListener,
     connections: tokio::sync::Mutex<Vec<OwnedWriteHalf>>,
 }
 
-impl Router {
-    pub fn new() -> Router {
-        Default::default()
+impl Server {
+    pub async fn new() -> Server {
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        Server {
+            listener,
+            connections: Default::default(),
+        }
     }
 
-    pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    pub async fn handle_connections(self: Arc<Self>) {
+        loop {
+            let (socket, _) = self.listener.accept().await.unwrap();
+            let router = self.clone();
 
-        tokio::spawn(async move {
-            loop {
-                let (socket, _) = listener.accept().await.unwrap();
-                let router = self.clone();
-
-                tokio::spawn(async move {
-                    router.handle_connection(socket).await;
-                });
-            }
-        })
+            tokio::spawn(async move {
+                router.handle_connection(socket).await;
+            });
+        }
     }
 
     async fn handle_connection(&self, socket: TcpStream) {
@@ -303,6 +368,7 @@ impl Router {
 
         loop {
             let n = read.read_buf(&mut buffer).await.unwrap();
+            assert!(n != 0);
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
@@ -313,81 +379,12 @@ impl Router {
         }
     }
 }
-
-struct ParseError;
-
-fn parse_message(message: &mut BytesMut) -> Result<(u32, Bytes), ParseError> {
-    if message.len() < 5 {
-        return Err(ParseError);
-    }
-
-    let end = message[4..]
-        .iter()
-        .position(|&c| c == b'\0')
-        .ok_or(ParseError)?
-        + 5;
-
-    let dest: u32 = u32::from_be_bytes(message[..4].try_into().unwrap());
-
-    let data = message.split_to(end).split_off(4).freeze();
-
-    Ok((dest, data))
-}
 ```
 
-If you use this example with the previous test and run `cargo test` it passes.
+By splitting the socket into a writer and a reader, reading no longer blocks, and we can hold a mutex in a single place. This is still pretty bad, a single client can hold the lock forever, 
 
-In this version, we model the shared-state as a single map that any of the related task running can access by acquiring a lock.
-
-This brings some problem with it, one if we had additional state that we want to mutate at the same time, it'd require careful handling to avoid deadlock.
-
-In fact, in this particular case we need careful handling as I've used `socket.into_split()` but nothing prevents us from simply using a map like:
-
-```rs
-Mutex<Vec<Arc<tokio::sync::Mutex<TcpStream>>>>,
-```
-
-And write something like:
-
-```rs
-    async fn handle_connection(&self, socket: TcpStream) {
-        let socket = Arc::new(tokio::sync::Mutex::new(socket));
-        let id = {
-            let mut connections = self.connections.lock().unwrap();
-            connections.push(socket.clone());
-            connections.len() - 1
-        };
-
-        socket.lock().await.write_u32(id as u32).await.unwrap();
-        socket.lock().await.flush().await.unwrap();
-
-        let mut buffer = BytesMut::new();
-
-        loop {
-            let n = socket.lock().await.read_buf(&mut buffer).await.unwrap();
-            assert!(n != 0);
-
-            let Ok((dest, m)) = parse_message(&mut buffer) else {
-                continue;
-            };
-
-            let conn = {
-                let connections = self.connections.lock().unwrap();
-                connections[dest as usize].clone()
-            };
-
-            // Here we deadlock!
-            let mut conn = conn.lock().await;
-            conn.write_all(&m).await.unwrap();
-        }
-    }
-```
-
-This creates a deadlock the first time a client tries to message another! when doing `conn.lock()` before locking the socket to write, even when the destination is not itself - Remember we prohibited that - we have another task, that might be running in paralel, holding a mutex trying to read from the same connection. 
-
-<!-- Add a diagram illustrating the contention -->
-
-But that's not all, even if you manage to avoid deadlocks this isn't very good, there's still head-of-the-line blocking, we need to hold a lock as long as it takes one socket to write, this means only one client can write at a time, slowing down the whole processing pipeline. A slow client can hold the queue for a very long time, and even if there's no slow client at some point this doesn't scale.
+But that's not all, even if you manage to avoid deadlocks this isn't very good, there's still head-of-the-line blocking, we need to hold a lock as long as it takes one socket to write, this means only one client can write at a time, slowing down the whole processing pipeline.
+A slow client can hold the queue for a very long time, and even if there's no slow client at some point this doesn't scale.
 
 <!-- Add a diagram showing how a task is making the other wait? -->
 
