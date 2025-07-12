@@ -196,7 +196,7 @@ fn parse_message(message: &mut BytesMut) -> Result<(u32, Bytes), ParseError> {
 
 The function is quite simple; the implementation details are unimportant for the rest of the examples.
 
-Now let's go to the first implementation using `Mutex` to shared the sockets.
+Now let's go to the first implementation using `Mutex` to share sockets.
 
 ### Mutex
 
@@ -251,15 +251,13 @@ impl Server {
 }
 ```
 
-The compiler is quick to point out that in line 21 `self` is borrowed data for a `'static` lifetime, which escapes the scope of `handle_connection`. Furthermore, in line 18, `self` is used after being moved.
+The compiler is quick to point out that in line 21 `self` is borrowed for a `'static` lifetime, which escapes the scope of `handle_connection`. Furthermore, in line 18, `self` is used after being moved.
 
 This means we need both multi-thread reference counting and internal-mutability so `Arc<Mutex<T>>` it is.
 
-There're a few ways to implement this, we can just wrap `connections` or the whole struct. I'll just use an `Arc` for the whole struct, so we can move `self` and a `Mutex` on connections
+There are a few ways to implement this; we can just wrap `connections` or the whole struct. I'll just use an `Arc` for the whole struct, so we can move `self` into the new task, and a `Mutex` on connections so we can just lock on that shared vector. If one tries to do this with a conventional `std::sync::Mutex` the compiler will disallow it. Since we need to hold the lock while we send a message, we need to use Tokio's `Mutex`.
 
-If one tries to do this with a conventional `std::sync::Mutex` the compiler will disallow it. Because we need to hold the lock while we send a message, we need to use tokio mutex.
-
-But, again, a naive implementation like this will result in problems.
+But, again, a naive implementation like the following will result in problems.
 
 ```rs,linenos,hl_lines=27,hl_lines=35,hl_lines=45
 struct Server {
@@ -315,11 +313,9 @@ impl Server {
 }
 ```
 
-If you run `cargo test` here, this will simply deadlock. On line 35 the client will grab the lock and hold it until a message is received. For our test, the first client doesn't send a message until it recieves the id from the second client. And the second client can't get the id until it obtains the lock. So a deadlock.
+If you run `cargo test` now, this will simply deadlock. On line 35 we grab the lock for the client and hold it until the client sends a new message. For our test, the first client to connect doesn't send a message until it receives the ID from the second client. And the second client can't get the ID until it obtains the lock in line 27, so a deadlock.
 
-We could try to fix this by using a different id scheme, or holding the number of clients in a different variable. But this won't do, on line 35 we hold the mutex for all clients, so any client can prevent any other 2 clients for an arbitrarily long time.
-
-Instead, the more correct implementation will look like this.
+We could try to fix this by using a different ID scheme or holding the number of clients in a different variable. Even with that refactor, there are plenty of conditions for deadlocks between lines 35 and 45. Instead, the more correct implementation will look like this.
 
 
 ```rs
@@ -375,7 +371,7 @@ impl Server {
 }
 ```
 
-By splitting the socket into a writer and a reader, reading no longer blocks, and we can hold a mutex in a single place. This is still pretty bad, a single client can hold the lock forever, 
+By splitting the socket into a writer and a reader, we no longer block when reading. This means, we can hold a `Mutex` only for writing. This is still pretty bad, a single client can hold the lock forever, 
 
 But that's not all, even if you manage to avoid deadlocks this isn't very good, there's still head-of-the-line blocking, we need to hold a lock as long as it takes one socket to write, this means only one client can write at a time, slowing down the whole processing pipeline. A slow client can hold the queue for a very long time, and even if there's no slow client at some point this doesn't scale.
 
