@@ -34,5 +34,9 @@ codeblock = true
 radion_title = "Taping Memory"
 latex = true
 theme = "toggle"
-comments = false
 enable_search = true
+
+comments = true
+giscus_repo = "conectado/Blog"
+giscus_repo_id = "R_kgDOOvgM3A"
+giscus_data_category_id = "DIC_kwDOOvgM3M4Cs3D-"
