@@ -1,16 +1,18 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 #[tokio::main]
 async fn main() {
-    let mut router = Server::new().await;
+    let router = Arc::new(Server::new().await);
     router.handle_connections().await;
 }
 
 struct Server {
     listener: TcpListener,
-    connections: Vec<TcpStream>,
+    connections: tokio::sync::Mutex<Vec<TcpStream>>,
 }
 
 impl Server {
@@ -22,33 +24,40 @@ impl Server {
         }
     }
 
-    pub async fn handle_connections(&mut self) {
+    pub async fn handle_connections(self: Arc<Self>) {
         loop {
             let (socket, _) = self.listener.accept().await.unwrap();
+            let router = Arc::clone(&self);
 
             tokio::spawn(async move {
-                self.handle_connection(socket).await;
+                router.handle_connection(socket).await;
             });
         }
     }
 
-    async fn handle_connection(&mut self, mut socket: TcpStream) {
-        let id = self.connections.len();
+    async fn handle_connection(&self, mut socket: TcpStream) {
+        let id = self.connections.lock().await.len();
         socket.write_u32(id as u32).await.unwrap();
         socket.flush().await.unwrap();
-        self.connections.push(socket);
+        self.connections.lock().await.push(socket);
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = self.connections[id].read_buf(&mut buffer).await.unwrap();
+            let n = self.connections.lock().await[id]
+                .read_buf(&mut buffer)
+                .await
+                .unwrap();
             assert!(n != 0);
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
             };
 
-            self.connections[dest as usize].write_all(&m).await.unwrap();
+            self.connections.lock().await[dest as usize]
+                .write_all(&m)
+                .await
+                .unwrap();
         }
     }
 }
