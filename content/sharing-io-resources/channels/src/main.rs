@@ -7,19 +7,19 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() {
-    let router = Arc::new(Router::new());
+    let router = Arc::new(Server::new());
     router.handle_connections().await.await.unwrap();
 }
 
-struct Router {
+struct Server {
     tx: mpsc::Sender<Message>,
 }
 
-impl Router {
-    pub fn new() -> Router {
+impl Server {
+    pub fn new() -> Server {
         let (tx, rx) = mpsc::channel(100);
         tokio::spawn(message_dispatcher(rx));
-        Router { tx }
+        Server { tx }
     }
 
     pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -107,14 +107,14 @@ mod tests {
         net::TcpStream,
     };
 
-    use crate::Router;
+    use crate::Server;
 
     #[tokio::test]
     async fn it_works() {
         const INT_MSG1: &str = "hello, number 2\0";
         const INT_MSG2: &str = "hello back, number 1\0";
 
-        let router = Arc::new(Router::new());
+        let router = Arc::new(Server::new());
         router.handle_connections().await;
 
         let mut sock1 = TcpStream::connect("127.0.0.1:8080").await.unwrap();

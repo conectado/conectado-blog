@@ -318,7 +318,7 @@ If you run `cargo test` now, this will simply deadlock. On line 35 we grab the l
 We could try to fix this by using a different ID scheme or holding the number of clients in a different variable. Even with that refactor, there are plenty of conditions for deadlocks between lines 35 and 45. Instead, the more correct implementation will look like this.
 
 
-```rs
+```rs,linenos,hl_lines=47
 struct Server {
     listener: TcpListener,
     connections: tokio::sync::Mutex<Vec<OwnedWriteHalf>>,
@@ -371,34 +371,26 @@ impl Server {
 }
 ```
 
-By splitting the socket into a writer and a reader, we no longer block when reading. This means, we can hold a `Mutex` only for writing. This is still pretty bad, a single client can hold the lock forever, 
+By splitting the socket into a writer and a reader, we only need to hold a `Mutex` for writing; this way we lock in a single place. But this is still pretty bad; a single client can hold the lock for an indefinitely long time. In line 47, if the socket's buffer is full, the `MutexGuard` won't be released until there's room in the buffer. That'll prevent any message from being forwarded to other clients, even when their buffers aren't filled.
 
-But that's not all, even if you manage to avoid deadlocks this isn't very good, there's still head-of-the-line blocking, we need to hold a lock as long as it takes one socket to write, this means only one client can write at a time, slowing down the whole processing pipeline. A slow client can hold the queue for a very long time, and even if there's no slow client at some point this doesn't scale.
+You could try to fix this by wrapping every writer with an `Arc<Mutex<OwnedWriteHalf>>`, but this keeps adding to the complexity and potential pitfalls. Hopefully, this already illustrates how bad it can get with `Mutex`; correctly using them is being proved difficult, even with this relatively simple application and little state.
 
-<!-- Add a diagram showing how a task is making the other wait? -->
+This is especially accentuated by the fact that our state includes an IO resource. But with any complex state, even those that don't include IO resources, as soon as there is more than one `Mutex`, it becomes a minefield of deadlocks. Mutexes can be properly used, but it's hard and probably not the best idea for most IO-bound applications.
 
-For anyone familiar with async coding in Rust this is expected, particularly, when sharing IO resources there's another very recommended model.
-
-
-#### Further reading 
-
-* [Tokio's Shared State docs](https://tokio.rs/tokio/tutorial/shared-state)
-* [Alice Rhyl's Shared mutable state in Rust](https://draft.ryhl.io/blog/shared-mutable-state/)
+Then let's move to a very well known alternative to share state in concurrent applications, channels.
 
 ### Channels
 
 > [!NOTE]
 > The code for this section can be found in the [channels](./channels) directory.
 
-So the classic way to avoid this pitfall is to use channels.
+To use channels instead of a `Mutex` to synchronize access to state, we use a single task that owns the state, and the other tasks use channels to send messages to update and retrieve state.
 
-There are actually 2 patterns that use the channel primitive. The differences are subtle and they are not the focus of this article.
+There are many flavors of this pattern; actors[^1] is one of the most popular. Sometimes we use a response channel; sometimes we don't need it. Regardless of the specifics, I want to focus on more general properties of this pattern, so I'll use channels as plainly as possible.
 
-Instead of having a mutex to share state among connections, we have a single task that manages the state, therefore a Mutex isn't needed, instead we use a channel to send messages to that task.
+This is a simple reimplementation using channels.
 
-It looks like this:
-
-```rs
+```rs,linenos,hl_lines=46-60
 struct Router {
     tx: mpsc::Sender<Message>,
 }
@@ -465,6 +457,8 @@ enum Message {
     Send(u32, Bytes),
 }
 ```
+
+Now we have a single `message_dispatcher` that owns `connections`, by nature of being the single owner, `message_dispatcher` has `&mut` access to `connections` without any additional synchronization.
 
 This is very nice, as there's no mutex and thus no deadlocks, but still, head-of-the-line blocking is there!
 
@@ -861,3 +855,7 @@ I believe for I/O heavy applications, probably the reactor pattern will be the e
 You can mix and match as needed, channels are I/O events for your reactor. Mutexes can be made to work along with any of these models, and I haven't touched on atomics.
 
 What I hope you take away from this article, is that, particularly in Rust, you can fundamentally chose how you approach shared mutable state by chosing how to model I/O. And also a better understanding of the reactor pattern which is normally relegated to executor implementation but it can be used in user-facing code.
+
+---
+
+[^1]: https://draft.ryhl.io/blog/actors-with-tokio/
