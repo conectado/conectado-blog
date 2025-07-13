@@ -1,5 +1,5 @@
 # Gabriel Steinberg
-## Senior Rust Developer | Secure systems & network programming
+## Senior Rust Developer
 
 ---
 
@@ -14,20 +14,15 @@
 
 ## Professional Summary
 
-Senior systems programmer with 5+ years of experience in Rust, distributed systems, and secure network protocols.
-
-Proven track record building high-performance, security-critical infrastructure for remote access and enterprise applications.
-
-Specializing in low-level programming, network protocols, and cross-platform system design.
+I have more than 5 years of experience in Rust. Passion for low-level networking, correct code, and technical complexity! Working to understand problems at their root and modeling solutions that can scale while maintaining correctness.
 
 ---
 
 ## Key Achievements
 
-- Successfully architected and implemented production-grade Zero Trust networking solutions
-- Led architectural migrations improving system performance and reliability
-- Built secure, high-performance blockchain infrastructure handling financial transactions
-- Contributed to enterprise security tools used by cybersecurity professionals worldwide
+* Implemented a cross-platform zero-trust remote access solution from scratch.
+* Led architecture migrations that decimated the number of bugs and increased performance ten-fold.
+* Fixed a myriad of obscure bugs in legacy security-critical software.
 
 ---
 
@@ -36,12 +31,15 @@ Specializing in low-level programming, network protocols, and cross-platform sys
 ### Programming Languages
 - **Expert:** Rust
 - **Proficient:** C++, Python
-- **Novice:** TypeScript
+- **Novice:** TypeScript, Swift, Kotlin
 
 ### Tools & Frameworks
 - **Development:** Git, Docker, SQL, NodeJS
 - **Blockchain:** Substrate
+- **Operating Systems:** Linux, Windows, macOS, iOS, Android 
 - **Specializations:** Network programming, distributed systems, protocol implementation
+- **Networking:** WireGuard, TCP, UDP, DNS, ICE
+- **Cloud:** AWS, Azure
 
 ### Languages
 - **Spanish:** Native
@@ -54,40 +52,45 @@ Specializing in low-level programming, network protocols, and cross-platform sys
 ### Senior Backend Engineer | Firezone
 **May 2022 - Present | Fully Remote**
 
-Developing client and gateway components for secure remote access solution using Wireguard and Rust:
+Developing client and gateway components for a secure remote access solution using **WireGuard** and **Rust**.
 
-- **Connlib Architecture:** Designed and implemented cross-platform Rust library for secure packet and DNS routing, serving as the core component of Firezone's Zero Trust remote access solution
-- **DNS Interception System:** Built high-performance stub DNS server enabling split-horizon DNS functionality, central to packet routing decisions based on DNS names
-- **Architecture Migration:** Helped transition to single-threaded, sans-I/O model, significantly reducing deadlocks and improving system efficiency
-- **Quality Assurance:** Helped implement property-based testing framework ensuring reliable, secure functionality critical for Zero Trust architecture
+Implemented from scratch the cross-platform **Windows**, **Linux**, **macOS**, ***Android**, and **iOS** library running the backbone of the operation, which included p2p connections using **STUN** and **TURN**.
+
+Implemented DNS interception to achieve split-DNS, routing, and filtering.
+
+Used property testing, unit testing, and a concurrent single-threaded architecture based on sans-I/O to ensure correctness and performance.
 
 ### Blockchain Developer | Enjin  
 **April 2021 - May 2022 | Fully Remote**
 
-- Designed and developed runtime for token-centered blockchain using Rust and Substrate
-- Architected secure backend wallet system from scratch using Rust, focusing on cryptographic security and performance
+Designed and developed key components in an NFT Polkadot-based chain using **Rust** and **Substrate**.
+
+Architected a backend wallet system from scratch using **Rust**, focusing on integration with **AWS** HSM and local keys.
 
 ### Blockchain Developer | Jsgenesis (Joystream)
 **November 2020 - April 2021 | Fully Remote**
 
-- Developed runtime components for blockchain-based video streaming service using Rust and Substrate
-- Contributed to decentralized content delivery platform architecture
+Developed runtime components, focusing on the benchmarks, for a blockchain-based video streaming service using **Rust** and Substrate.
 
 ### C++/Python Developer | HelpSystems
 **June 2019 - November 2020 | Buenos Aires, Argentina**
 
-- Developed, debugged, and maintained Core Impact pen-testing tool using C++ and Python
-- Solved complex, obscure bugs in security-critical software
-- Contributed to enterprise cybersecurity tooling used by security professionals
+Developed, debugged, and maintained the Core Impact pen-testing tool using **C++** and **Python**.
+
+Solved complex, obscure bugs in security-critical software that was more than 15 years old.
+
+Worked along with malware researchers to give them the tools for their work.
 
 ### Lead Developer | SOUTHWORKS
 **February 2018 - June 2019 | Buenos Aires, Argentina**
 
-Led development teams of 3-4 developers on high-impact client projects including Microsoft:
+Led a development team of 4 developers for big client projects that included Microsoft.
 
-- **Enterprise Web Application:** Fixed critical issues and bugs in .NET web application serving millions of users
-- **IoT Solution:** Designed and developed comprehensive IoT solution using Azure IoT Edge, integrating Python, Node.js, and OpenCV for computer vision capabilities
-- **Team Leadership:** Provided technical guidance and organized development workflows for multiple concurrent projects
+Fixed critical performance issues in a **.NET** web application serving millions of users.
+
+Designed and developed an IoT solution using **Azure IoT Edge**, using **Python**, **Node.js**, and OpenCV for computer vision.
+
+Provided technical guidance to my team, increasing our velocity and advancing their careers.
 
 ---
 
@@ -101,7 +104,7 @@ Led development teams of 3-4 developers on high-impact client projects including
 ### Repos
 
 - [Firezone](https://github.com/firezone/firezone)
-- [eBPF firewall(WIP)](https://github.com/conectado/ebpf-firewall)
+- [eBPF firewall (WIP)](https://github.com/conectado/ebpf-firewall)
 
 ---
 
@@ -113,10 +116,3 @@ Led development teams of 3-4 developers on high-impact client projects including
 **2006 - 2011 | Buenos Aires, Argentina**
 
 ---
-
-## Areas of Interest
-
-- **Systems Programming:** Distributed systems, operating systems, low-level programming
-- **Network Engineering:** Protocol implementation, network programming, performance optimization
-- **Emerging Technologies:** Machine learning, functional programming, graphics programming
-- **Security:** Zero Trust architecture, cryptographic protocols, secure system design
