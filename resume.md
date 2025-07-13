@@ -58,7 +58,7 @@ Client and gateway components architecture and development for a secure remote a
 
 * **Architected DNS Interception System:** Implemented DNS interception to achieve split-DNS, routing, and filtering.
 
-* **Ensuring requirements:** Used property testing, unit testing, and a concurrent single-threaded architecture based on sans-I/O to ensure correctness and performance.
+* **Enforced strict correctness and performance guarantees:** Used property testing, unit testing, and a concurrent single-threaded architecture based on sans-I/O to ensure correctness and performance.
 
 ### Blockchain Developer | Enjin  
 **April 2021 - May 2022 | Fully Remote**
