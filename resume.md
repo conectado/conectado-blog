@@ -52,45 +52,45 @@ I have more than 5 years of experience in Rust. Passion for low-level networking
 ### Senior Backend Engineer | Firezone
 **May 2022 - Present | Fully Remote**
 
-Developing client and gateway components for a secure remote access solution using **WireGuard** and **Rust**.
+Client and gateway components architecture and development for a secure remote access solution using **WireGuard** and **Rust**.
 
-Implemented from scratch the cross-platform **Windows**, **Linux**, **macOS**, ***Android**, and **iOS** library running the backbone of the operation, which included p2p connections using **STUN** and **TURN**.
+* **Engineered Cross-platform library implementation:**  Implemented from scratch the cross-platform **Windows**, **Linux**, **macOS**, ***Android**, and **iOS** library running the backbone of the operation, which included p2p connections using **STUN** and **TURN**.
 
-Implemented DNS interception to achieve split-DNS, routing, and filtering.
+* **Architected DNS Interception System:** Implemented DNS interception to achieve split-DNS, routing, and filtering.
 
-Used property testing, unit testing, and a concurrent single-threaded architecture based on sans-I/O to ensure correctness and performance.
+* **Ensuring requirements:** Used property testing, unit testing, and a concurrent single-threaded architecture based on sans-I/O to ensure correctness and performance.
 
 ### Blockchain Developer | Enjin  
 **April 2021 - May 2022 | Fully Remote**
 
-Designed and developed key components in an NFT Polkadot-based chain using **Rust** and **Substrate**.
+* **Wallet Daemon development and architecture:** Architected a backend wallet system from scratch using **Rust**, focusing on integration with **AWS** HSM and local keys.
 
-Architected a backend wallet system from scratch using **Rust**, focusing on integration with **AWS** HSM and local keys.
+* **Substrate development:** Designed and developed key components in an NFT Polkadot-based chain using **Rust** and **Substrate**.
 
 ### Blockchain Developer | Jsgenesis (Joystream)
 **November 2020 - April 2021 | Fully Remote**
 
-Developed runtime components, focusing on the benchmarks, for a blockchain-based video streaming service using **Rust** and Substrate.
+* **Substrate development:** Developed runtime components, focusing on the benchmarks, for a blockchain-based video streaming service using **Rust** and Substrate.
 
 ### C++/Python Developer | HelpSystems
 **June 2019 - November 2020 | Buenos Aires, Argentina**
 
-Developed, debugged, and maintained the Core Impact pen-testing tool using **C++** and **Python**.
+* **Pen-test tool development:** Developed, debugged, and maintained the Core Impact pen-testing tool using **C++** and **Python**.
 
-Solved complex, obscure bugs in security-critical software that was more than 15 years old.
+* **Legacy software maintenance:** Solved complex, obscure bugs in security-critical software that was more than 15 years old.
 
-Worked along with malware researchers to give them the tools for their work.
+* **Researchers collaboration:** Worked along with malware researchers to give them the tools for their work.
 
 ### Lead Developer | SOUTHWORKS
 **February 2018 - June 2019 | Buenos Aires, Argentina**
 
 Led a development team of 4 developers for big client projects that included Microsoft.
 
-Fixed critical performance issues in a **.NET** web application serving millions of users.
+* **Performance Optimization:** Fixed critical performance issues in a **.NET** web application serving millions of users.
 
-Designed and developed an IoT solution using **Azure IoT Edge**, using **Python**, **Node.js**, and OpenCV for computer vision.
+* **IoT architecture:** Designed and developed an IoT solution using **Azure IoT Edge**, using **Python**, **Node.js**, and OpenCV for computer vision.
 
-Provided technical guidance to my team, increasing our velocity and advancing their careers.
+* **Leadership:** Provided technical guidance to my team, increasing our velocity and advancing their careers.
 
 ---
 
