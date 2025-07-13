@@ -1,7 +1,6 @@
 # Gabriel Steinberg
 ## Senior Rust Developer
 
----
 
 ### Contact
 - **Email:** gabrielalejandro7@gmail.com
@@ -10,13 +9,11 @@
 - **Location:** Buenos Aires, Argentina
 - **Blog:** [Taping Memory](https://taping-memory.dev/)
 
----
 
 ## Professional Summary
 
 I have more than 5 years of experience in Rust. Passion for low-level networking, correct code, and technical complexity! Working to understand problems at their root and modeling solutions that can scale while maintaining correctness.
 
----
 
 ## Key Achievements
 
@@ -24,7 +21,6 @@ I have more than 5 years of experience in Rust. Passion for low-level networking
 * Led architecture migrations that decimated the number of bugs and increased performance ten-fold.
 * Fixed a myriad of obscure bugs in legacy security-critical software.
 
----
 
 ## Skills
 
@@ -45,7 +41,6 @@ I have more than 5 years of experience in Rust. Passion for low-level networking
 - **Spanish:** Native
 - **English:** Advanced Intermediate
 
----
 
 ## Experience
 
@@ -54,15 +49,15 @@ I have more than 5 years of experience in Rust. Passion for low-level networking
 
 Client and gateway components architecture and development for a secure remote access solution using **WireGuard** and **Rust**.
 
-* **Engineered Cross-platform library implementation** for **Windows**, **Linux**, **macOS**, ***Android**, and **iOS** library, running the backbone of the operation, which included p2p connections using **STUN** and **TURN**.
+* **Engineered Cross-platform library** for **Windows**, **Linux**, **macOS**, ***Android**, and **iOS** library, running the backbone of the operation, which included p2p connections using **STUN** and **TURN**.
 * **Architected DNS Interception System** achieving split-DNS, routing, and filtering.
 * **Enforced strict correctness and performance guarantees** using property testing, unit testing, and a concurrent single-threaded architecture based on sans-I/O.
 
 ### Blockchain Developer | Enjin  
 **April 2021 - May 2022 | Fully Remote**
 
-* **Wallet Daemon development and architecture** from scratch using **Rust**, focusing on integration with **AWS** HSM and local keys.
-* **Substrate development and design** of key components in an NFT Polkadot-based chain using **Rust** and **Substrate**.
+* **Development and architecture of Wallet Daemon** from scratch using **Rust**, focusing on integration with **AWS** HSM and local keys.
+* **Development and design in Substrate** of key components in an NFT Polkadot-based chain using **Rust** and **Substrate**.
 
 ### Blockchain Developer | Jsgenesis (Joystream)
 **November 2020 - April 2021 | Fully Remote**
@@ -82,7 +77,6 @@ Client and gateway components architecture and development for a secure remote a
 * **Performance Optimization** in a **.NET** web application serving millions of users.
 * **IoT architecture design and development** for an automatic door with **Azure IoT Edge**, using **Python**, **Node.js**, and OpenCV for computer vision.
 
----
 
 ## Projects
 
@@ -96,7 +90,6 @@ Client and gateway components architecture and development for a secure remote a
 - [Firezone](https://github.com/firezone/firezone)
 - [eBPF firewall (WIP)](https://github.com/conectado/ebpf-firewall)
 
----
 
 ## Education
 
@@ -104,5 +97,3 @@ Client and gateway components architecture and development for a secure remote a
 
 ### Technical School with ICT Orientation | ORT
 **2006 - 2011 | Buenos Aires, Argentina**
-
----
