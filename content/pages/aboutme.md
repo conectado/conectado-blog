@@ -1,7 +1,10 @@
 +++
 title = "About Me"
-description = "Stuff about gabriel"
+description = "Stuff about Gabi"
 template = "page.html"
+
+[extra]
+comments = false
 +++
 
 Hello! I'm Gabriel Steinberg, I also go by @conectado, but you can call me Gabi if you want.
