@@ -6,7 +6,7 @@ draft = false
 
 [taxonomies]
 tags = ["rust", "programming", "memory-management", "concurrency", "IO"]
-categories = ["rust", "deep dives"]
+categories = ["rust", "patterns"]
 
 [extra]
 toc = true
@@ -458,15 +458,11 @@ enum Message {
 }
 ```
 
-Now we have a single `message_dispatcher` that owns `connections`, by nature of being the single owner, `message_dispatcher` has `&mut` access to `connections` without any additional synchronization.
+In this version we have a single `message_dispatcher` that owns `connections`. By nature of being the single owner, `message_dispatcher` has `&mut` access to `connections` without any additional synchronization. This is much simpler than using a `Mutex` as there can't be any deadlock[^2]. But there's head-of-the-line blocking.
 
-This is very nice, as there's no mutex and thus no deadlocks, but still, head-of-the-line blocking is there!
+In this case, head-of-the-line block means that line 56 prevents messages from any other client from being processed if the socket is not immediately ready. A possible fix is to wrap the sockets in a `Mutex` to be able to move them into a new task for writing, and in that way `message_dispatcher` can continue processing messages, but we're trying to avoid mutexes.
 
-After receiving a message in the `message_dispatcher` we call `connections[id].write_all().await` that blocks until we write to that connection preventing us from handling the next message.
-
-We could have `connections` be a `Vec<Arc<Mutex<OwnedWriteHalf>>>` and spawn a new task where we write to that owned write half instead of doing it in-task, but again, mutexes are a possible foot-gun.
-
-So we could instead apply a channel per writing half too. We can change the `message_dispatcher` to something like this.
+A better solution is to have a single task owning each writer, in this way:
 
 ```rs
 async fn central_dispatcher(mut rx: mpsc::Receiver<Message>) {
@@ -496,21 +492,15 @@ async fn client_dispatcher(mut connection: OwnedWriteHalf, mut rx: mpsc::Receive
         connection.write_all(&m).await.unwrap();
     }
 }
-
-enum Message {
-    New(OwnedWriteHalf),
-    Send(u32, Bytes),
-}
 ```
 
 > [!NOTE]
 > The full code for this version can be found in the [channel-per-writer](./channel-per-writer) directory.
 
-This is a bit better, channel's `send` with complete immediatley except when the channel is full. But it still has some drawbacks.
+By moving the writer's ownership into the individual `client_dispatcher`, we are able to keep scheduling messages to the socket even when its buffer is full. This is just an additional buffering layer, with the benefit that we're in control of its size, but a single burst of messages to one client could block `central_dispatcher`.
 
-For one, it could be full, a very slow client could cause that then we are back again at a point where it's blocking. We could always fix it by spawning a new task to send to the client's dispatcher.
+We can instead use `try_send`, which isn't blocking, and manage our own buffering logic for all clients. Yet, managing the message buffer can grow into a quite complex problem. To solve this, we can spawn a new task for each message we send to the `client_dispatcher` without using any mutex, since now `writers[i]` is cloneable.
 
-We could also do something like this:
 
 ```rs
         match msg {
@@ -859,3 +849,4 @@ What I hope you take away from this article, is that, particularly in Rust, you 
 ---
 
 [^1]: https://draft.ryhl.io/blog/actors-with-tokio/
+[^2]: In fairness, deadlocks are still possible, if 2 tasks are waiting from one another preventing from making any other work.
