@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::{FutureExt, future::select_all};
+use futures::FutureExt;
 use futures_concurrency::future::Race;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -7,11 +7,11 @@ use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::main]
 async fn main() {
-    let mut router = Router::new().await;
+    let mut router = Server::new().await;
     router.handle_connections().await;
 }
 
-struct Router {
+struct Server {
     read_connections: Vec<ReadSocket>,
     write_connections: Vec<WriteSocket>,
     listener: TcpListener,
@@ -23,37 +23,47 @@ enum Event<'a> {
     Connection(TcpStream),
 }
 
-impl Router {
-    async fn new() -> Router {
+impl Server {
+    async fn new() -> Server {
         let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
-        Router {
+        Server {
             read_connections: vec![],
             write_connections: vec![],
             listener,
         }
     }
 
+    fn next_event(&mut self) -> impl Future<Output = Event> {
+        let listen = self
+            .listener
+            .accept()
+            .map(|stream| Event::Connection(stream.unwrap().0));
+
+        // Neither `Race` nor `select_all` works with empty vectors
+        if self.read_connections.is_empty() {
+            return listen.boxed();
+        }
+
+        let reads = self
+            .read_connections
+            .iter_mut()
+            .map(|reader| reader.read())
+            .collect::<Vec<_>>()
+            .race();
+
+        let writes = self
+            .write_connections
+            .iter_mut()
+            .map(|write| write.advance_send())
+            .collect::<Vec<_>>()
+            .race();
+
+        (listen, reads, writes).race().boxed()
+    }
+
     async fn handle_connections(&mut self) {
         loop {
-            let s3 = self
-                .listener
-                .accept()
-                .boxed()
-                .map(|r| Event::Connection(r.unwrap().0));
-
-            let ev = if self.read_connections.is_empty() || self.write_connections.is_empty() {
-                s3.await
-            } else {
-                let s1 = select_all(self.read_connections.iter_mut().map(|c| c.read().boxed()))
-                    .map(|(d, ..)| Event::Read(d));
-                let s2 = select_all(
-                    self.write_connections
-                        .iter_mut()
-                        .map(|c| c.advance_send().boxed()),
-                )
-                .map(|(e, _, _)| e);
-                (s1, s2, s3).race().await
-            };
+            let ev = self.next_event().await;
             match ev {
                 Event::Read(bytes_mut) => {
                     let Ok((i, d)) = parse_message(bytes_mut) else {
@@ -86,9 +96,9 @@ impl ReadSocket {
         }
     }
 
-    async fn read(&mut self) -> &mut BytesMut {
+    async fn read(&mut self) -> Event {
         self.reader.read_buf(&mut self.buffer).await.unwrap();
-        &mut self.buffer
+        Event::Read(&mut self.buffer)
     }
 }
 
@@ -148,14 +158,14 @@ mod tests {
         net::TcpStream,
     };
 
-    use crate::Router;
+    use crate::Server;
 
     #[tokio::test]
     async fn it_works() {
         const INT_MSG1: &str = "hello, number 2\0";
         const INT_MSG2: &str = "hello back, number 1\0";
 
-        let mut router = Router::new().await;
+        let mut router = Server::new().await;
         tokio::spawn(async move {
             router.handle_connections().await;
         });
