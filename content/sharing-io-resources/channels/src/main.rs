@@ -7,34 +7,32 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() {
-    let router = Arc::new(Server::new());
-    router.handle_connections().await.await.unwrap();
+    let router = Arc::new(Server::new().await);
+    router.handle_connections().await;
 }
 
 struct Server {
     tx: mpsc::Sender<Message>,
+    listener: TcpListener,
 }
 
 impl Server {
-    pub fn new() -> Server {
+    pub async fn new() -> Server {
         let (tx, rx) = mpsc::channel(100);
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
         tokio::spawn(message_dispatcher(rx));
-        Server { tx }
+        Server { tx, listener }
     }
 
-    pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    pub async fn handle_connections(self: Arc<Self>) {
+        loop {
+            let (socket, _) = self.listener.accept().await.unwrap();
+            let router = self.clone();
 
-        tokio::spawn(async move {
-            loop {
-                let (socket, _) = listener.accept().await.unwrap();
-                let router = self.clone();
-
-                tokio::spawn(async move {
-                    router.handle_connection(socket).await;
-                });
-            }
-        })
+            tokio::spawn(async move {
+                router.handle_connection(socket).await;
+            });
+        }
     }
 
     async fn handle_connection(&self, socket: TcpStream) {
@@ -114,8 +112,8 @@ mod tests {
         const INT_MSG1: &str = "hello, number 2\0";
         const INT_MSG2: &str = "hello back, number 1\0";
 
-        let router = Arc::new(Server::new());
-        router.handle_connections().await;
+        let router = Arc::new(Server::new().await);
+        tokio::spawn(async { router.handle_connections().await });
 
         let mut sock1 = TcpStream::connect("127.0.0.1:8080").await.unwrap();
         let mut sock2 = TcpStream::connect("127.0.0.1:8080").await.unwrap();

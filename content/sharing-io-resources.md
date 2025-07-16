@@ -391,30 +391,28 @@ There are many flavors of this pattern; actors[^1] is one of the most popular. S
 This is a simple reimplementation using channels.
 
 ```rs,linenos,hl_lines=46-60
-struct Router {
+struct Server {
     tx: mpsc::Sender<Message>,
+    listener: TcpListener,
 }
 
-impl Router {
-    pub fn new() -> Router {
+impl Server {
+    pub async fn new() -> Server {
         let (tx, rx) = mpsc::channel(100);
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
         tokio::spawn(message_dispatcher(rx));
-        Router { tx }
+        Server { tx, listener }
     }
 
-    pub async fn handle_connections(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    pub async fn handle_connections(self: Arc<Self>) {
+        loop {
+            let (socket, _) = self.listener.accept().await.unwrap();
+            let router = self.clone();
 
-        tokio::spawn(async move {
-            loop {
-                let (socket, _) = listener.accept().await.unwrap();
-                let router = self.clone();
-
-                tokio::spawn(async move {
-                    router.handle_connection(socket).await;
-                });
-            }
-        })
+            tokio::spawn(async move {
+                router.handle_connection(socket).await;
+            });
+        }
     }
 
     async fn handle_connection(&self, socket: TcpStream) {
@@ -526,18 +524,170 @@ We can instead use `try_send`, which isn't blocking, and manage our own bufferin
         }
 ```
 
-Now this solves the problem, but then you have new tasks to manage, those can't access the shared state. So as you add more state and more tasks to complete the number of tasks and channels keep scaling.
+This solves most of the problems; at some point back-pressure needs to be handled and having the task that sends messages to the `client_dispatcher` be blocked seems good enough. However, one might want to stop reading packets as channels get filled; that way the TCP queues get full and new packets don't get acknowledge and clients will automatically retransmit packets. Notice, however, this would require a channel back from the anonymous tasks that send the bytes to the `client_dispatcher` and then back from the `central_dispatcher` to `handle_connection`.
 
-This can quickly become hard to manage if you don't find the right abstractions.
+Another way we will require more channels is if we wanted to start handling errors on writing to the socket. Instead of being able to handle errors idiomatically in-place in `central_dispatcher`, `client_dispatcher` would need a way to send the error back, if that error would kill the connection.
 
-And the problem with channel is that it's very prone to action-at-a-distance. Meaning, when you spawn a channel, the reciever and transmitter starts moving around and you can quickly lose where those came from.
+Furthermore, each additional IO requires its own task, additionally, each piece of state requires either its own task or to be added to the `central_dispatch`. The first way would also require more channels for cross-comunication between state owners, and the problem with all these channels is that they are decoupled from the tasks generating messages. This is what we want from channels, but it potentially makes code harder to follow. Look at `central_dispatcher` by itself.
 
-Furthermore, when we created a channel, we set the limit for that channel, afterwards it creates backpressure. Which is a nice feature for bounded channel, but you need to tune that number and it's not always obvious what number should go there.
+```rs
+async fn central_dispatcher(mut rx: mpsc::Receiver<Message>) {
+    let mut writers = Vec::new();
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            Message::New(connection) => {
+                let (tx, rx) = mpsc::channel(100);
 
-You could always use unbounded channels and save yourselve all these problems, this isn't recommended as unbounded memory allocation can lead to a new set of different problems.
+                let w = tx.clone();
+                let id = writers.len();
+                tokio::spawn(client_dispatcher(connection, rx));
+                tokio::spawn(async move {
+                    w.send(Bytes::from_owner((id as u32).to_be_bytes()))
+                        .await
+                        .unwrap();
+                });
+                writers.push(tx);
+            }
+            Message::Send(id, items) => {
+                let w = writers[id as usize].clone();
+                tokio::spawn(async move {
+                    w.send(items).await.unwrap();
+                });
+            }
+        }
+    }
+}
 
-### Reactor
+```
 
+There's no way to tell how `Message` was created, if for example, we wanted to know if the bytes somehow correlate to a valid string, we would need to hunt down where `Message::Send` is created. That could potentially be anyhwere. Considering the producers can be sent back and forth between tasks, cloned, it can become very complicated.
+
+All of this to say, while it's very nice no longer requiring mutexes, by decoupling IO and state it becomes harder to communicate errors back to the state  and correlate data that alters the state with the IO that generates the data. I mentioned that there is another way to handle additional state, other than having new tasks handling it. We can move it into `central_dispatcher` and have it multiplex messages from multiple channels. This doesn't solve the complexity of data and IO lack of co-location, but it tells us that we could potentially handle all IO-events in a single task concurrently. So let's look into that.
+
+### A single task to rule them all
+
+#### Racing futures
+
+There's an alternative to select in the crate `futures-concurrency` called `Race`. It's very simlar to `select` but only gives us the result as a return value and it works with tuples.
+
+Let's re-write the hand-rolled version using this.
+
+First we will have a slightly different version of the socket.
+
+```rs
+struct ReadSocket {
+    buffer: BytesMut,
+    reader: OwnedReadHalf,
+}
+
+impl ReadSocket {
+    fn new(reader: OwnedReadHalf) -> ReadSocket {
+        ReadSocket {
+            buffer: BytesMut::new(),
+            reader,
+        }
+    }
+
+    async fn read(&mut self) -> &mut BytesMut {
+        self.reader.read_buf(&mut self.buffer).await.unwrap();
+        &mut self.buffer
+    }
+}
+
+struct WriteSocket {
+    buffer: BytesMut,
+    writer: OwnedWriteHalf,
+}
+
+impl WriteSocket {
+    fn new(writer: OwnedWriteHalf) -> WriteSocket {
+        WriteSocket {
+            buffer: BytesMut::new(),
+            writer,
+        }
+    }
+
+    async fn advance_send(&mut self) -> Event {
+        loop {
+            if !self.buffer.has_remaining() {
+                std::future::pending::<Event>().await;
+            }
+
+            self.writer.write_all_buf(&mut self.buffer).await.unwrap();
+        }
+    }
+
+    fn send(&mut self, buf: &[u8]) {
+        self.buffer.put_slice(buf);
+    }
+}
+```
+We change the `Event` to
+
+```rs
+enum Event<'a> {
+    Read(&'a mut BytesMut),
+    Connection(TcpStream),
+}
+```
+
+and now `Router` looks like this.
+
+```rs
+impl Router {
+    async fn new() -> Router {
+        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+        Router {
+            read_connections: vec![],
+            write_connections: vec![],
+            listener,
+        }
+    }
+
+    async fn handle_connections(&mut self) {
+        loop {
+            let s3 = self
+                .listener
+                .accept()
+                .boxed()
+                .map(|r| Event::Connection(r.unwrap().0));
+
+            let ev = if self.read_connections.is_empty() || self.write_connections.is_empty() {
+                s3.await
+            } else {
+                let s1 = select_all(self.read_connections.iter_mut().map(|c| c.read().boxed()))
+                    .map(|(d, ..)| Event::Read(d));
+                let s2 = select_all(
+                    self.write_connections
+                        .iter_mut()
+                        .map(|c| c.advance_send().boxed()),
+                )
+                .map(|(e, _, _)| e);
+                (s1, s2, s3).race().await
+            };
+            match ev {
+                Event::Read(bytes_mut) => {
+                    let Ok((i, d)) = parse_message(bytes_mut) else {
+                        continue;
+                    };
+                    self.write_connections[i as usize].send(&d);
+                }
+                Event::Connection(tcp_stream) => {
+                    let (r, w) = tcp_stream.into_split();
+                    let mut write_sock = WriteSocket::new(w);
+                    write_sock.send(&(self.write_connections.len() as u32).to_be_bytes());
+                    self.read_connections.push(ReadSocket::new(r));
+                    self.write_connections.push(write_sock);
+                }
+            }
+        }
+    }
+}
+```
+
+Now we're modeling I/O as a stream of events. We suspend execution while awaiting any of those events, each time one of the events happen we're signaled about it.
+
+In response we handle the event synchroneously, in a context where we have mutable access to the state.
 #### Hand-rolled future
 
 There's another option that's way less discussed, if you think about it, what we want to do is:
@@ -683,128 +833,7 @@ We could have a single place where we ask "Is any I/O ready? if it's let me hand
 
 And there's an async/await construct that does basically this, `select`.
 
-#### Race (select)
-
-There's an alternative to select in the crate `futures-concurrency` called `Race`. It's very simlar to `select` but only gives us the result as a return value and it works with tuples.
-
-Let's re-write the hand-rolled version using this.
-
-First we will have a slightly different version of the socket.
-
-```rs
-struct ReadSocket {
-    buffer: BytesMut,
-    reader: OwnedReadHalf,
-}
-
-impl ReadSocket {
-    fn new(reader: OwnedReadHalf) -> ReadSocket {
-        ReadSocket {
-            buffer: BytesMut::new(),
-            reader,
-        }
-    }
-
-    async fn read(&mut self) -> &mut BytesMut {
-        self.reader.read_buf(&mut self.buffer).await.unwrap();
-        &mut self.buffer
-    }
-}
-
-struct WriteSocket {
-    buffer: BytesMut,
-    writer: OwnedWriteHalf,
-}
-
-impl WriteSocket {
-    fn new(writer: OwnedWriteHalf) -> WriteSocket {
-        WriteSocket {
-            buffer: BytesMut::new(),
-            writer,
-        }
-    }
-
-    async fn advance_send(&mut self) -> Event {
-        loop {
-            if !self.buffer.has_remaining() {
-                std::future::pending::<Event>().await;
-            }
-
-            self.writer.write_all_buf(&mut self.buffer).await.unwrap();
-        }
-    }
-
-    fn send(&mut self, buf: &[u8]) {
-        self.buffer.put_slice(buf);
-    }
-}
-```
-We change the `Event` to
-
-```rs
-enum Event<'a> {
-    Read(&'a mut BytesMut),
-    Connection(TcpStream),
-}
-```
-
-and now `Router` looks like this.
-
-```rs
-impl Router {
-    async fn new() -> Router {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
-        Router {
-            read_connections: vec![],
-            write_connections: vec![],
-            listener,
-        }
-    }
-
-    async fn handle_connections(&mut self) {
-        loop {
-            let s3 = self
-                .listener
-                .accept()
-                .boxed()
-                .map(|r| Event::Connection(r.unwrap().0));
-
-            let ev = if self.read_connections.is_empty() || self.write_connections.is_empty() {
-                s3.await
-            } else {
-                let s1 = select_all(self.read_connections.iter_mut().map(|c| c.read().boxed()))
-                    .map(|(d, ..)| Event::Read(d));
-                let s2 = select_all(
-                    self.write_connections
-                        .iter_mut()
-                        .map(|c| c.advance_send().boxed()),
-                )
-                .map(|(e, _, _)| e);
-                (s1, s2, s3).race().await
-            };
-            match ev {
-                Event::Read(bytes_mut) => {
-                    let Ok((i, d)) = parse_message(bytes_mut) else {
-                        continue;
-                    };
-                    self.write_connections[i as usize].send(&d);
-                }
-                Event::Connection(tcp_stream) => {
-                    let (r, w) = tcp_stream.into_split();
-                    let mut write_sock = WriteSocket::new(w);
-                    write_sock.send(&(self.write_connections.len() as u32).to_be_bytes());
-                    self.read_connections.push(ReadSocket::new(r));
-                    self.write_connections.push(write_sock);
-                }
-            }
-        }
-    }
-}
-```
-
-Now we're modeling I/O as a stream of events. We suspend execution while awaiting any of those events, each time one of the events happen we're signaled about it.
-
-In response we handle the event synchroneously, in a context where we have mutable access to the state. 
+ 
 
 #### Benefits and drawbacks
 
