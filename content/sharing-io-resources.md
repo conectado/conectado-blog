@@ -639,11 +639,28 @@ Let's say, for example, a new administration socket that can subscribe multiple 
 
 #### Racing futures
 
-There's an alternative to select in the crate `futures-concurrency` called `Race`. It's very simlar to `select` but only gives us the result as a return value and it works with tuples.
+Handling multiple concurrent events in a single task in async Rust is actually a pretty common pattern; a typical reason to do this is to wait for both a timeout and a channel or to handle cancellation while blocking on some IO. This is often done through the [`tokio::select!`](https://docs.rs/tokio/latest/tokio/macro.select.html) macro. However, `tokio::select!` isn't ideal for our case; we have a variable number of futures we want to listen to, so we can use something like [`futures::future::select_all`](https://docs.rs/futures/latest/futures/future/fn.select_all.html) or [`futures_concurrency::future::Race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html).
 
-Let's re-write the hand-rolled version using this.
 
-First we will have a slightly different version of the socket.
+ As explained [in Tokio's docs,](https://docs.rs/tokio/latest/tokio/macro.select.html#merging-streams) this can also be achieved using streams; that way we never drop an incomplete future. By doing it that way, we don't have to worry about cancellation safety. Nevertheless, all futures we're using are cancel-safe, so we will go with `futures_concurrency::future::Race`, as that makes adaptors as simple as possible.
+
+With this in mind, our goal is to wait concurrently on any of our possible IO events:
+* A new TCP connection.
+* A new message from a socket.
+And react as they happen synchronously. Concurrently to waiting on those events, we want to forward bytes to the clients.
+
+The first thing we require to make this work is to homogenize the return types from our futures, this will simply be done by an `Event` enum.
+
+```rs
+enum Event<'a> {
+    Read(&'a mut BytesMut),
+    Connection(TcpStream),
+}
+```
+
+This is similar to the `Message` enum we had before, but the `Read` variant doesn't contain the parsed message; instead, it has the raw bytes from the socket. The parsing will be done after the event is generated.
+
+Now, this socket abstraction makes it all come together. Let's take a look at it.
 
 ```rs
 struct ReadSocket {
@@ -659,9 +676,9 @@ impl ReadSocket {
         }
     }
 
-    async fn read(&mut self) -> &mut BytesMut {
+    async fn read(&mut self) -> Event {
         self.reader.read_buf(&mut self.buffer).await.unwrap();
-        &mut self.buffer
+        Event::Read(&mut self.buffer)
     }
 }
 
@@ -681,7 +698,7 @@ impl WriteSocket {
     async fn advance_send(&mut self) -> Event {
         loop {
             if !self.buffer.has_remaining() {
-                std::future::pending::<Event>().await;
+                std::future::pending::<Infallible>().await;
             }
 
             self.writer.write_all_buf(&mut self.buffer).await.unwrap();
@@ -693,49 +710,55 @@ impl WriteSocket {
     }
 }
 ```
-We change the `Event` to
+
+There's nothing outlandish with the `ReadSocket`; it owns its read buffer so as to make the `read` function only take `&mut self`. This way sockets don't need to share buffers and allows multiple `read` calls to run concurrently.
+
+`WriteSocket` in contrast is pretty interesting. We don't really need to handle any event from sending bytes down to the clients, but we do need to drive that future forward. In order to do this, `send` doesn't block, instead it schedules the bytes to be sent at a later point. This way, as soon as we read some new bytes we can `send` them without blocking the task. In order to drive the socket forward we'll use the future created by `advance_send`.
+
+In its signature `advance_send` returns an `Event`; however, the only purpose of the return type is to be able to use it with `Race` at a later time; the function itself never returns. Instead, it loops indefinitely; if its buffer is empty, it will await on `pending`. This leaves the future in a `Pending` state without any wake condition, meaning `advance_send` will never do any more work. If the buffer has anything left on it, the function will try to write all its contents into the socket and loop around into the pending state once it's done. If at any point while writing its contents the `advance_send` future is dropped, `write_all_buf` only advances `BytesMut` the number of bytes that has been written. Meaning, next time we call `advance_send` on the same `WriteSocket`, it'll continue sending bytes from the last byte we left off.
+
+Now, if we were to simply `await` on `advance_send`, that would block a task forever, but if we do it concurrently with other futures we `select` we can react to the other futures and continue driving the `WriteSocket` forward.
+
+With these new structs in place, we need need to know how we "wait for the next event".
 
 ```rs
-enum Event<'a> {
-    Read(&'a mut BytesMut),
-    Connection(TcpStream),
-}
+    fn next_event(&mut self) -> impl Future<Output = Event> {
+        let listen = self
+            .listener
+            .accept()
+            .map(|stream| Event::Connection(stream.unwrap().0));
+
+        // Neither `Race` nor `select_all` works with empty vectors
+        if self.read_connections.is_empty() {
+            return listen.boxed();
+        }
+
+        let reads = self
+            .read_connections
+            .iter_mut()
+            .map(|reader| reader.read())
+            .collect::<Vec<_>>()
+            .race();
+
+        let writes = self
+            .write_connections
+            .iter_mut()
+            .map(|write| write.advance_send())
+            .collect::<Vec<_>>()
+            .race();
+
+        (listen, reads, writes).race().boxed()
+    }
 ```
 
-and now `Router` looks like this.
+When there are no connections yet, the only possible event is a new connection emitted by the `listener`. Otherwise, we `race` among all the futures from all writers, readers and the listener, and emit an event based on the first one to finish. [`race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html#tymethod.race) is a method provided by the `Race` trait. `race` is also fair[^4][^5], in the sense that no one of the futures will hog the executor.
+
+With this `next_event` in place we can now handle all events concurrently in a single task, using this `handle_connections` function.
 
 ```rs
-impl Router {
-    async fn new() -> Router {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
-        Router {
-            read_connections: vec![],
-            write_connections: vec![],
-            listener,
-        }
-    }
-
     async fn handle_connections(&mut self) {
         loop {
-            let s3 = self
-                .listener
-                .accept()
-                .boxed()
-                .map(|r| Event::Connection(r.unwrap().0));
-
-            let ev = if self.read_connections.is_empty() || self.write_connections.is_empty() {
-                s3.await
-            } else {
-                let s1 = select_all(self.read_connections.iter_mut().map(|c| c.read().boxed()))
-                    .map(|(d, ..)| Event::Read(d));
-                let s2 = select_all(
-                    self.write_connections
-                        .iter_mut()
-                        .map(|c| c.advance_send().boxed()),
-                )
-                .map(|(e, _, _)| e);
-                (s1, s2, s3).race().await
-            };
+            let ev = self.next_event().await;
             match ev {
                 Event::Read(bytes_mut) => {
                     let Ok((i, d)) = parse_message(bytes_mut) else {
@@ -753,12 +776,73 @@ impl Router {
             }
         }
     }
+```
+
+Notice how now we have `&mut self` access to the state, we can simply modify `read_connections` and `write_connections` as our IO generates events. And we have the benefit of concurrency provided by the runtime to execute all this IO concurrently. I think this is pretty neat.
+
+Yet, we can go further down this path. First, let's get something out of the way, we can make this approach zero-copy with a few modifications. We change `WriteSocket` to this.
+
+```rs
+struct WriteSocket {
+    buffers: Vec<Bytes>,
+    writer: OwnedWriteHalf,
+}
+
+impl WriteSocket {
+    fn new(writer: OwnedWriteHalf) -> WriteSocket {
+        WriteSocket {
+            buffers: Vec::new(),
+            writer,
+        }
+    }
+
+    async fn advance_send(&mut self) -> Event {
+        loop {
+            let Some(buffer) = self.buffers.first_mut() else {
+                std::future::pending::<Infallible>().await;
+                unreachable!();
+            };
+
+            self.writer.write_all_buf(buffer).await.unwrap();
+
+            self.buffers.pop();
+        }
+    }
+
+    fn send(&mut self, buf: Bytes) {
+        self.buffers.push(buf);
+    }
 }
 ```
 
-Now we're modeling I/O as a stream of events. We suspend execution while awaiting any of those events, each time one of the events happen we're signaled about it.
+Now, `send` no longer copies data, instead keeps it in an internal vector. Then with a slight modification to `handle_connection` we can make this all work.
 
-In response we handle the event synchroneously, in a context where we have mutable access to the state.
+```rs
+    pub async fn handle_connections(&mut self) {
+        loop {
+            let ev = self.next_event().await;
+            match ev {
+                Event::Read(bytes_mut) => {
+                    let Ok((i, d)) = parse_message(bytes_mut) else {
+                        continue;
+                    };
+                    self.write_connections[i as usize].send(d);
+                }
+                Event::Connection(tcp_stream) => {
+                    let (r, w) = tcp_stream.into_split();
+                    let mut write_sock = WriteSocket::new(w);
+                    write_sock.send(Bytes::from_owner(
+                        (self.write_connections.len() as u32).to_be_bytes(),
+                    ));
+                    self.read_connections.push(ReadSocket::new(r));
+                    self.write_connections.push(write_sock);
+                }
+            }
+        }
+    }
+```
+
+But now, let's imagine we wanted to not even allocate a vector, we just want to reuse the same actual buffer, well thanks to the magic of the `bytes` crate it might be possible but it becomes very hard, the problem is that `advance_send` and `read` can't share state. But we could share state if we manually rolled the future ourselves.
 
 #### Hand-rolled future
 
@@ -952,3 +1036,5 @@ What I hope you take away from this article, is that, particularly in Rust, you 
 [^1]: https://draft.ryhl.io/blog/actors-with-tokio/
 [^2]: In fairness, deadlocks are still possible, if 2 tasks are waiting from one another preventing from making any other work.
 [^3]: https://draft.ryhl.io/blog/actors-with-tokio/ has a very good explanation on how this can be done!
+[^4]:https://github.com/yoshuawuyts/futures-concurrency/issues/85
+[^5]:https://github.com/yoshuawuyts/futures-concurrency/pull/104

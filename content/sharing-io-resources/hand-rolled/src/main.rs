@@ -10,19 +10,19 @@ use std::task::ready;
 use tokio::net::{TcpListener, TcpStream};
 #[tokio::main]
 async fn main() {
-    let mut router = Router::new().await;
+    let mut router = Server::new().await;
     router.handle_connections().await;
 }
 
-struct Router {
+struct Server {
     connections: Vec<Socket>,
     listener: TcpListener,
 }
 
-impl Router {
-    async fn new() -> Router {
+impl Server {
+    async fn new() -> Server {
         let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
-        Router {
+        Server {
             connections: vec![],
             listener,
         }
@@ -47,15 +47,7 @@ impl Router {
             }
 
             for i in 0..self.connections.len() {
-                let Poll::Ready(buf) = self.connections[i].poll_read(cx) else {
-                    continue;
-                };
-
-                let Ok((dest, b)) = parse_message(buf) else {
-                    continue;
-                };
-
-                self.connections[dest as usize].send(&b);
+                self.connections[i].poll_read(cx);
             }
 
             return Poll::Pending;
@@ -108,21 +100,23 @@ impl Socket {
         }
     }
 
-    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<&mut BytesMut> {
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         loop {
             ready!(self.stream.poll_read_ready(cx)).unwrap();
             let Ok(_) = self.stream.try_read_buf(&mut self.read_buffer) else {
                 continue;
             };
 
-            return Poll::Ready(&mut self.read_buffer);
+            if let Some(w) = self.waker.take() {
+                w.wake_by_ref();
+            }
         }
     }
 }
 
 struct ParseError;
 
-fn parse_message(message: &mut BytesMut) -> Result<(u32, Bytes), ParseError> {
+fn parse_message(message: &mut BytesMut) -> Result<(u32, &[u8]), ParseError> {
     if message.len() < 5 {
         return Err(ParseError);
     }
@@ -133,11 +127,9 @@ fn parse_message(message: &mut BytesMut) -> Result<(u32, Bytes), ParseError> {
         .ok_or(ParseError)?
         + 5;
 
-    let dest: u32 = u32::from_be_bytes(message[..4].try_into().unwrap());
+    let dest = u32::from_be_bytes(message[..4].try_into().unwrap());
 
-    let data = message.split_to(end).split_off(4).freeze();
-
-    Ok((dest, data))
+    Ok((dest, &message[4..end]))
 }
 
 #[cfg(test)]
@@ -148,14 +140,14 @@ mod tests {
         net::TcpStream,
     };
 
-    use crate::Router;
+    use crate::Server;
 
     #[tokio::test]
     async fn it_works() {
         const INT_MSG1: &str = "hello, number 2\0";
         const INT_MSG2: &str = "hello back, number 1\0";
 
-        let mut router = Router::new().await;
+        let mut router = Server::new().await;
         tokio::spawn(async move {
             router.handle_connections().await;
         });

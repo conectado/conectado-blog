@@ -1,4 +1,6 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::convert::Infallible;
+
+use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use futures_concurrency::future::Race;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -61,7 +63,7 @@ impl Server {
         (listen, reads, writes).race().boxed()
     }
 
-    async fn handle_connections(&mut self) {
+    pub async fn handle_connections(&mut self) {
         loop {
             let ev = self.next_event().await;
             match ev {
@@ -69,12 +71,14 @@ impl Server {
                     let Ok((i, d)) = parse_message(bytes_mut) else {
                         continue;
                     };
-                    self.write_connections[i as usize].send(&d);
+                    self.write_connections[i as usize].send(d);
                 }
                 Event::Connection(tcp_stream) => {
                     let (r, w) = tcp_stream.into_split();
                     let mut write_sock = WriteSocket::new(w);
-                    write_sock.send(&(self.write_connections.len() as u32).to_be_bytes());
+                    write_sock.send(Bytes::from_owner(
+                        (self.write_connections.len() as u32).to_be_bytes(),
+                    ));
                     self.read_connections.push(ReadSocket::new(r));
                     self.write_connections.push(write_sock);
                 }
@@ -103,30 +107,33 @@ impl ReadSocket {
 }
 
 struct WriteSocket {
-    buffer: BytesMut,
+    buffers: Vec<Bytes>,
     writer: OwnedWriteHalf,
 }
 
 impl WriteSocket {
     fn new(writer: OwnedWriteHalf) -> WriteSocket {
         WriteSocket {
-            buffer: BytesMut::new(),
+            buffers: Vec::new(),
             writer,
         }
     }
 
     async fn advance_send(&mut self) -> Event {
         loop {
-            if !self.buffer.has_remaining() {
-                std::future::pending::<Event>().await;
-            }
+            let Some(buffer) = self.buffers.first_mut() else {
+                std::future::pending::<Infallible>().await;
+                unreachable!();
+            };
 
-            self.writer.write_all_buf(&mut self.buffer).await.unwrap();
+            self.writer.write_all_buf(buffer).await.unwrap();
+
+            self.buffers.pop();
         }
     }
 
-    fn send(&mut self, buf: &[u8]) {
-        self.buffer.put_slice(buf);
+    fn send(&mut self, buf: Bytes) {
+        self.buffers.push(buf);
     }
 }
 

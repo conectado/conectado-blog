@@ -1,0 +1,10 @@
+[package]
+name = "race"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.45.1", features = ["full"] }
+bytes = "1"
+futures-concurrency = "7.6.3"
+futures = "0.3.31"
