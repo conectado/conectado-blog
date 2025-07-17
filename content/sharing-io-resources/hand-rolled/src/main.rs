@@ -1,6 +1,7 @@
 use bytes::Buf;
 use bytes::Bytes;
 use bytes::BytesMut;
+use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::task::Context;
 use std::task::Poll;
@@ -65,7 +66,7 @@ impl Server {
 }
 
 struct Socket {
-    write_buffers: Vec<Bytes>,
+    write_buffers: VecDeque<Bytes>,
     read_buffer: BytesMut,
     stream: TcpStream,
     waker: Option<Waker>,
@@ -74,7 +75,7 @@ struct Socket {
 impl Socket {
     fn new(stream: TcpStream) -> Socket {
         Socket {
-            write_buffers: Vec::new(),
+            write_buffers: VecDeque::new(),
             read_buffer: BytesMut::new(),
             waker: None,
             stream,
@@ -82,7 +83,7 @@ impl Socket {
     }
 
     fn send(&mut self, buf: Bytes) {
-        self.write_buffers.push(buf);
+        self.write_buffers.push_back(buf);
         let Some(w) = self.waker.take() else {
             return;
         };
@@ -99,7 +100,7 @@ impl Socket {
         loop {
             ready!(self.stream.poll_write_ready(cx)).unwrap();
 
-            let buffer = self.write_buffers.first_mut().unwrap();
+            let buffer = self.write_buffers.front_mut().unwrap();
 
             let Ok(n) = self.stream.try_write(buffer) else {
                 continue;
@@ -108,7 +109,7 @@ impl Socket {
             buffer.advance(n);
 
             if buffer.is_empty() {
-                self.write_buffers.pop();
+                self.write_buffers.pop_front();
             }
 
             return Poll::Ready(());

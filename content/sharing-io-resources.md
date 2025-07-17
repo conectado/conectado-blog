@@ -785,33 +785,33 @@ Yet, we can go further down this path. First, let's get something out of the way
 
 ```rs
 struct WriteSocket {
-    buffers: Vec<Bytes>,
+    buffers: VecDeque<Bytes>,
     writer: OwnedWriteHalf,
 }
 
 impl WriteSocket {
     fn new(writer: OwnedWriteHalf) -> WriteSocket {
         WriteSocket {
-            buffers: Vec::new(),
+            buffers: VecDeque::new(),
             writer,
         }
     }
 
     async fn advance_send(&mut self) -> Event {
         loop {
-            let Some(buffer) = self.buffers.first_mut() else {
+            let Some(buffer) = self.buffers.front_mut() else {
                 std::future::pending::<Infallible>().await;
                 unreachable!();
             };
 
             self.writer.write_all_buf(buffer).await.unwrap();
 
-            self.buffers.pop();
+            self.buffers.pop_front();
         }
     }
 
     fn send(&mut self, buf: Bytes) {
-        self.buffers.push(buf);
+        self.buffers.push_back(buf);
     }
 }
 ```
@@ -855,7 +855,7 @@ Let's begin at how the `Socket` implementation will look here. We can't split th
 
 ```rs
 struct Socket {
-    write_buffers: Vec<Bytes>,
+    write_buffers: VecDeque<Bytes>,
     read_buffer: BytesMut,
     stream: TcpStream,
     waker: Option<Waker>,
@@ -864,7 +864,7 @@ struct Socket {
 impl Socket {
     fn new(stream: TcpStream) -> Socket {
         Socket {
-            write_buffers: Vec::new(),
+            write_buffers: VecDeque::new(),
             read_buffer: BytesMut::new(),
             waker: None,
             stream,
@@ -872,7 +872,7 @@ impl Socket {
     }
 
     fn send(&mut self, buf: Bytes) {
-        self.write_buffers.push(buf);
+        self.write_buffers.push_back(buf);
         let Some(w) = self.waker.take() else {
             return;
         };
@@ -889,7 +889,7 @@ impl Socket {
         loop {
             ready!(self.stream.poll_write_ready(cx)).unwrap();
 
-            let buffer = self.write_buffers.first_mut().unwrap();
+            let buffer = self.write_buffers.front_mut().unwrap();
 
             let Ok(n) = self.stream.try_write(buffer) else {
                 continue;
@@ -898,7 +898,7 @@ impl Socket {
             buffer.advance(n);
 
             if buffer.is_empty() {
-                self.write_buffers.pop();
+                self.write_buffers.pop_front();
             }
 
             return Poll::Ready(());
@@ -977,15 +977,39 @@ Finally, to expose a nice async interface we use `poll_fn`.
     }
 ```
 
-And there we've it, we're manually polling the futures. If we were handling errors, `poll_send` could surface it directly as `Poll<io::Result<()>>`, for example. And then in the main loop we can handle it by doing `self.connection.remove[dest]`[^6]. There's also no need to homogenize the return types from the futures as we handle them separatedly.
+And there we have it; we're manually polling the futures. If we were handling errors, `poll_send` could surface it directly as `Poll<io::Result<()>>`, for example. And then in the main loop we can handle it by doing `self.connection.remove[dest]`[^6]. There's also no need to homogenize the return types from the futures, as we handle them separately.
 
-#### Benefits and drawbacks
+## Picking a pattern
+
+### Multi task vs Single task
+
+We've worked through these patterns and hopefully demonstrated a bit of their tradeoffs. Now let's expand on that to help you pick which one you should use in your application.
+
+This isn't a pick-one-or-the-other situation. You can "mix and match"; you can lock on a synchronous `Mutex` anywhere and race with an asynchronous one, although it doesn't expose a `poll` API, so you can't trivially use it if you're hand-rolling your own polling logic. You can always use a channel on a task that's polling on multiple futures or as part of a race; this way you can have more than one managing multiple futures with their own internal state and yet have them communicate. 
+
+Yet to pick one, you need to consider the trade-offs of these concurrency patterns.
+
+There's generally not much of a need to use a `Mutex`, considering how easy it's to mess it up. In practice, the cases where you want a mutex are limited to either very constrained environments on performance or memory, and you can't afford channels for some reason or another; or if you don't have an async runtime and need to share mutable access to some state between threads.
+
+Barring those constraints, we can either multiplex all futures in a single task, or use a task per I/O and communicate state updates through channels. For most cases it's better to use a single task, the ergonomics lost from having to explicitly buffer the state of the future is worth having direct mutable access to state instead of managing channels and tasks. After all, functionally the channel is just a buffering layer. 
+
+The big reason to sacrifice the ergonomics of having a single task with shared access to mutable state, is to have the different futures scheduled in parallel in multiple threads. This is important if the code synchronous code handling events or sequential polling of events is a bottleneck for the throughput of IO events produced. So if more events are produced than a single thread can handle, multiple tasks could be neccesary. This is however, a very complicated case, you lose data locality, the channels blocking and allocations can also negatively impact performance, so if you need to go down this route don't think just spawning new tasks will magically solve your performance issues.
+
+Of course, if your tasks don't need mutable access to the same state it's a good idea to use them to represent separated units of work and might be more performant. 
+
+### Hand-rolled future vs Combinators
+
+Finally, it comes down to a choice of either manually polling your futures, or using combinators and adaptors to race all the futures with typical `async`/`await` syntax. I'd tend to go for the first one, on one side there's the benefit that the io polling itself can share mutable state, this is normally not *necessary* but it gives you more versatility on how to structure your IO objects, another key point is that the combinators and adaptors can become very verbose and hard to follow when the codebase grows. Finally, when manually polling you have a plain view into the polling states, what's advancing and what's not, which can be very useful for debugging. Finally, there's the benefit of having the IO errors immediately be surfaced on `poll`.
+
+You lose some ergonomics of calling `await` yet, you can still wrap your function manually polling for IO with `poll_fn` and use it in a greater `async` context.
+
+So, in conclusion, if you've multiple futures that require access to shared mutable state, try to keep the polling within a single task, only go to multiple task if benchmarks hint at improvements. If the number of IO streams is small you can use combinators and wrappers to listen to the events concurrently, but as soon as it gets verbose or hard to debug you should try manually polling those events.
 
 #### Sans-IO
 
 Sans-IO is a model for network protocol, where you implement them in an IO-agnostic way, as a state machine that's evolved by outside events.
 
-You might immediately see the link with the single-task model, where we seggregate the events emitted by the IO to the state of the application.
+You might immediately see the link with the single-task model, where we segregate the events emitted by the IO to the state of the application.
 
 Both of these approaches work very well in tandem, one might say they are the same approach, reactor pattern seen from the perspective of how to actually structure the IO and Sans-IO on how to organize your code to react to those events.
 
@@ -996,16 +1020,6 @@ And in theory, you could still do I/O when reacting to an event in the reactor p
 So it's good to see them as 2 different approaches.
 
 To learn more about Sans-IO you could read...
-
-### Conclusion
-
-We've seen how modelling your I/O in your application has long lasting consequences and can change fundamentally how you need to handle mutable state.
-
-I believe for I/O heavy applications, probably the reactor pattern will be the easiest to maintain. But this isn't neccesarily a "xor" situation.
-
-You can mix and match as needed, channels are I/O events for your reactor. Mutexes can be made to work along with any of these models, and I haven't touched on atomics.
-
-What I hope you take away from this article, is that, particularly in Rust, you can fundamentally chose how you approach shared mutable state by chosing how to model I/O. And also a better understanding of the reactor pattern which is normally relegated to executor implementation but it can be used in user-facing code.
 
 ---
 

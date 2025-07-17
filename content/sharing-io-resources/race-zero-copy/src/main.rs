@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use bytes::{Bytes, BytesMut};
@@ -107,33 +108,33 @@ impl ReadSocket {
 }
 
 struct WriteSocket {
-    buffers: Vec<Bytes>,
+    buffers: VecDeque<Bytes>,
     writer: OwnedWriteHalf,
 }
 
 impl WriteSocket {
     fn new(writer: OwnedWriteHalf) -> WriteSocket {
         WriteSocket {
-            buffers: Vec::new(),
+            buffers: VecDeque::new(),
             writer,
         }
     }
 
     async fn advance_send(&mut self) -> Event {
         loop {
-            let Some(buffer) = self.buffers.first_mut() else {
+            let Some(buffer) = self.buffers.front_mut() else {
                 std::future::pending::<Infallible>().await;
                 unreachable!();
             };
 
             self.writer.write_all_buf(buffer).await.unwrap();
 
-            self.buffers.pop();
+            self.buffers.pop_front();
         }
     }
 
     fn send(&mut self, buf: Bytes) {
-        self.buffers.push(buf);
+        self.buffers.push_back(buf);
     }
 }
 
