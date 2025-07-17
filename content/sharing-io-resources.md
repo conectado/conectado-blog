@@ -751,9 +751,10 @@ With these new structs in place, we need need to know how we "wait for the next 
     }
 ```
 
-When there are no connections yet, the only possible event is a new connection emitted by the `listener`. Otherwise, we `race` among all the futures from all writers, readers and the listener, and emit an event based on the first one to finish. [`race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html#tymethod.race) is a method provided by the `Race` trait. `race` is also fair[^4][^5], in the sense that no one of the futures will hog the executor.
+When there are no connections yet, the only possible event is a new connection emitted by the `listener`. Otherwise, we `race` among all the futures from all writers, readers, and the listener, and emit an event based on the first one to finish. [`race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html#tymethod.race) is a method provided by the `Race` trait. `race` is also fair[^4][^5], in the sense that none of the futures will hog the executor.
 
-With this `next_event` in place we can now handle all events concurrently in a single task, using this `handle_connections` function.
+With this `next_event` in place, we can now handle all events concurrently in a single task, using this `handle_connections` function.
+
 
 ```rs
     async fn handle_connections(&mut self) {
@@ -778,9 +779,9 @@ With this `next_event` in place we can now handle all events concurrently in a s
     }
 ```
 
-Notice how now we have `&mut self` access to the state, we can simply modify `read_connections` and `write_connections` as our IO generates events. And we have the benefit of concurrency provided by the runtime to execute all this IO concurrently. I think this is pretty neat.
+Notice how now we have `&mut self` access to the state; we can simply modify `read_connections` and `write_connections` as our IO generates events. And we have the benefit of concurrency provided by the runtime to execute all this IO concurrently. I think this is pretty neat.
 
-Yet, we can go further down this path. First, let's get something out of the way, we can make this approach zero-copy with a few modifications. We change `WriteSocket` to this.
+Yet, we can go further down this path. First, let's get something out of the way: we can make this approach zero-copy with a few modifications. We change `WriteSocket` to this.
 
 ```rs
 struct WriteSocket {
@@ -815,8 +816,7 @@ impl WriteSocket {
 }
 ```
 
-Now, `send` no longer copies data, instead keeps it in an internal vector. Then with a slight modification to `handle_connection` we can make this all work.
-
+Now, `send` no longer copies data; instead, it keeps it in an internal vector. Then with a slight modification to `handle_connection` we can make this all work.
 ```rs
     pub async fn handle_connections(&mut self) {
         loop {
@@ -842,33 +842,150 @@ Now, `send` no longer copies data, instead keeps it in an internal vector. Then 
     }
 ```
 
-But now, let's imagine we wanted to not even allocate a vector, we just want to reuse the same actual buffer, well thanks to the magic of the `bytes` crate it might be possible but it becomes very hard, the problem is that `advance_send` and `read` can't share state. But we could share state if we manually rolled the future ourselves.
+This is all well and good, but there are still some other trade-offs we can make. First, note that we need to make an adaptor for every future to return a `Event`; this can get awkward when you've multiple futures from multiple sources. Furthermore, errors need to be wrapped with an event to be able to correlate it back to one of the futures with some indication of the causing future. `select_all` does give us exactly what the future that finished was, but it required some additional handling. Finally, there are some rare cases when you need to share state while the futures are advancing; for example, if for some reason you didn't have access to something like the bytes crate and didn't want to clone, you'd need to share access to the same buffer while writing and reading. This is simply impossible like this without a Mutex.
+
+So let's explore an option that lifts these limitations.
 
 #### Hand-rolled future
 
-To do this we kind of have to bend over backward. Hand-rolled futures are a potential foot gun if you're not careful. If at any point you return `Pending` without registering a waker your future will hang forever. But by doing this, we poll each future sequentially and that means each IO can potentially have access to shared mutable state between them. Let's see how this looks.
+Instead of merging all futures together and waiting for any of them to be ready, we can poll them one by one, see which are ready, and react immediately. As we poll each future, we register their waker in the background, and any event that wakes the waker will cause us to poll every future again. 
 
- 
+Let's begin at how the `Socket` implementation will look here. We can't split the IO no longer, as the splitted, version don't expose a convinent `poll` function for writing and reading.
+
+
+```rs
+struct Socket {
+    write_buffers: Vec<Bytes>,
+    read_buffer: BytesMut,
+    stream: TcpStream,
+    waker: Option<Waker>,
+}
+
+impl Socket {
+    fn new(stream: TcpStream) -> Socket {
+        Socket {
+            write_buffers: Vec::new(),
+            read_buffer: BytesMut::new(),
+            waker: None,
+            stream,
+        }
+    }
+
+    fn send(&mut self, buf: Bytes) {
+        self.write_buffers.push(buf);
+        let Some(w) = self.waker.take() else {
+            return;
+        };
+
+        w.wake_by_ref();
+    }
+
+    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.write_buffers.is_empty() {
+            self.waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        loop {
+            ready!(self.stream.poll_write_ready(cx)).unwrap();
+
+            let buffer = self.write_buffers.first_mut().unwrap();
+
+            let Ok(n) = self.stream.try_write(buffer) else {
+                continue;
+            };
+
+            buffer.advance(n);
+
+            if buffer.is_empty() {
+                self.write_buffers.pop();
+            }
+
+            return Poll::Ready(());
+        }
+    }
+
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<&mut BytesMut> {
+        loop {
+            ready!(self.stream.poll_read_ready(cx)).unwrap();
+            let Ok(_) = self.stream.try_read_buf(&mut self.read_buffer) else {
+                continue;
+            };
+
+            return Poll::Ready(&mut self.read_buffer);
+        }
+    }
+}
+```
+
+If you take a careful look at this, it's very similar to the previous version. `poll_read` tries to read from the `TcpStream` if there are bytes available it'll return a reference to them. Otherwise, it'll have its waker registered and return pending.
+
+`poll_send` is a bit more complicated, just because I wanted to keep the zero-copy from the latest version. First, if there's nothing to write it saves the waker so that when there's something to write we can be polled again. Then, if there's something to write, we check if the socket is ready for writing, otherwise we register the waker and return pending. If we manage to write, we update the buffers.
+
+Notice in both these functions we check for readiness, then we try to read or write, and normally you would handle explicitly the case of `WouldBlock`. In this case we assume there're no OS errors, so it must be a `WouldBlock`, then we need to re-register as the try_read/try_write doesn't do that for us, that's why we `continue`. 
+
+Lastly, `send` is pretty simple, we enqueue the buffer for writing and if there was a waker registered by `poll_send` previously, we wake it up, so that `poll_send` can be called again.
+
+With this in place we will add this function to the server.
+
+```rs
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        if let Poll::Ready(Ok((connection, _))) = self.listener.poll_accept(cx) {
+            let mut socket = Socket::new(connection);
+            let id = self.connections.len() as u32;
+            socket.send(Bytes::from_owner(id.to_be_bytes()));
+            self.connections.push(socket);
+            cx.waker().wake_by_ref();
+        }
+
+        for conn in &mut self.connections {
+            if conn.poll_send(cx).is_ready() {
+                cx.waker().wake_by_ref();
+            }
+        }
+
+        for i in 0..self.connections.len() {
+            let Poll::Ready(buf) = self.connections[i].poll_read(cx) else {
+                continue;
+            };
+
+            cx.waker().wake_by_ref();
+
+            let Ok((dest, b)) = parse_message(buf) else {
+                continue;
+            };
+
+            self.connections[dest as usize].send(b);
+        }
+
+        Poll::Pending
+    }
+
+```
+
+First, we check if listener has a new socket, in case there's we send the id to the socket and push it into our list of sockets. Then for each socket, we advance their internal send queue. Finally, for each socket, we try to read a message, if there's a complete message we enqueue it to the corresponding destination socket.
+
+This is no different from what we've been doing before, the only difference is that now instead of the executor polling each future for us we're doing it manually.
+
+There's some special care taken here, for one, there's fairness by always polling every future in every call to `poll_next`. This way, no particular socket can keep generating readiness events and prevent other future from advancing. Also, either a future returns pending after we stop polling it or we call `cx.waker().wake_by_ref()` so that we are immediately polled again, otherwise there's a chance the future is ready again and we are never awaken. 
+
+Finally, to expose a nice async interface we use `poll_fn`.
+
+```rs
+    async fn handle_connections(&mut self) {
+        poll_fn(move |cx| self.poll_next(cx)).await;
+    }
+```
+
+And there we've it, we're manually polling the futures. If we were handling errors, `poll_send` couuld surface it directly as `Poll<io::Result<()>>`, for example. And then in the main loop we can handle it by doing `self.connection.remove[dest]`[^6].
 
 #### Benefits and drawbacks
 
-This model, recovers the async/await format that can be very useful, as it's harder to put your application in a state where it'll never continue doing work.
-
-However, it comes at a price, in the previous version any time we `poll` a future we can use the shared mutable state this give us more flexibility on how we organize state and very importantly it can prevent additional copies.
-
-For example, both of this versions aren't zero-copy but on the first version we could modify it a little to be zero-copy. In all fairness, thanks to the `Bytes` crate  
-
-<!-- TODO: examples on both of these -->
-
-Another benefit of hand-rolling your future instead of using something like `select` or `race` is that the polling and fairness becomes very transparent, and also cancellation-safety is plain to see.
-
-It becomes easier to debug why your application hangs, as you can easily see how the polling and registration of wakers is done.
- 
 #### Sans-IO
 
 Sans-IO is a model for network protocol, where you implement them in an IO-agnostic way, as a state machine that's evolved by outside events.
 
-You might immediatley see the link with the reactor model, where we seggregate the events emitted by the IO to the state of the application.
+You might immediately see the link with the single-task model, where we seggregate the events emitted by the IO to the state of the application.
 
 Both of these approaches work very well in tandem, one might say they are the same approach, reactor pattern seen from the perspective of how to actually structure the IO and Sans-IO on how to organize your code to react to those events.
 
@@ -895,5 +1012,6 @@ What I hope you take away from this article, is that, particularly in Rust, you 
 [^1]: https://draft.ryhl.io/blog/actors-with-tokio/
 [^2]: In fairness, deadlocks are still possible, if 2 tasks are waiting from one another preventing from making any other work.
 [^3]: https://draft.ryhl.io/blog/actors-with-tokio/ has a very good explanation on how this can be done!
-[^4]:https://github.com/yoshuawuyts/futures-concurrency/issues/85
-[^5]:https://github.com/yoshuawuyts/futures-concurrency/pull/104
+[^4]: https://github.com/yoshuawuyts/futures-concurrency/issues/85
+[^5]: https://github.com/yoshuawuyts/futures-concurrency/pull/104
+[^6]: Of course there should be extra care to no longer use the index into the connections like we were before, a Map ofIDs to sockets would work much better.

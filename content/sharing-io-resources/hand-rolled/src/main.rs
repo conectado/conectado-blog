@@ -1,8 +1,10 @@
 use bytes::Buf;
+use bytes::Bytes;
 use bytes::BytesMut;
 use std::future::poll_fn;
 use std::task::Context;
 use std::task::Poll;
+use std::task::Waker;
 use std::task::ready;
 use tokio::net::{TcpListener, TcpStream};
 #[tokio::main]
@@ -27,45 +29,31 @@ impl Server {
 
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         if let Poll::Ready(Ok((connection, _))) = self.listener.poll_accept(cx) {
+            let mut socket = Socket::new(connection);
             let id = self.connections.len() as u32;
-            let socket = Socket::new(connection, id);
+            socket.send(Bytes::from_owner(id.to_be_bytes()));
             self.connections.push(socket);
             cx.waker().wake_by_ref();
         }
 
-        for i in 0..self.connections.len() {
-            let (connections_left, c) = self.connections.split_at_mut(i);
-            let (connection, connections_right) = c.split_at_mut(1);
-            let connection = connection.first_mut().unwrap();
-
-            connection.poll_id_message(cx);
-
-            if connection.poll_read(cx).is_ready() {
-                // If we're ready we want to immediatley reschedule ourselves
+        for conn in &mut self.connections {
+            if conn.poll_send(cx).is_ready() {
                 cx.waker().wake_by_ref();
-            };
-
-            let Some((dest, message)) = connection.poll_next_message() else {
-                continue;
-            };
-
-            let dest = dest as usize;
-
-            let connection_dest = if dest > i {
-                &connections_right[dest - i - 1]
-            } else {
-                &connections_left[dest]
-            };
-
-            let Poll::Ready(message_end) = connection_dest.poll_send(cx, message) else {
-                continue;
-            };
-
-            if message_end {
-                connection.pending_message_to.take();
             }
+        }
+
+        for i in 0..self.connections.len() {
+            let Poll::Ready(buf) = self.connections[i].poll_read(cx) else {
+                continue;
+            };
 
             cx.waker().wake_by_ref();
+
+            let Ok((dest, b)) = parse_message(buf) else {
+                continue;
+            };
+
+            self.connections[dest as usize].send(b);
         }
 
         Poll::Pending
@@ -77,105 +65,86 @@ impl Server {
 }
 
 struct Socket {
-    buffer: BytesMut,
-    id_message: BytesMut,
+    write_buffers: Vec<Bytes>,
+    read_buffer: BytesMut,
     stream: TcpStream,
-    pending_message_to: Option<u32>,
+    waker: Option<Waker>,
 }
 
 impl Socket {
-    fn new(stream: TcpStream, id: u32) -> Socket {
+    fn new(stream: TcpStream) -> Socket {
         Socket {
-            buffer: BytesMut::new(),
-            pending_message_to: None,
+            write_buffers: Vec::new(),
+            read_buffer: BytesMut::new(),
+            waker: None,
             stream,
-            id_message: BytesMut::from(&id.to_be_bytes()[..]),
         }
     }
 
-    fn poll_id_message(&mut self, cx: &mut Context<'_>) {
-        loop {
-            // As long as we're able we try to send all the id message bytes without a lot of attention for fairness
-            if self.id_message.is_empty() {
-                return;
-            }
+    fn send(&mut self, buf: Bytes) {
+        self.write_buffers.push(buf);
+        let Some(w) = self.waker.take() else {
+            return;
+        };
 
-            if self.stream.poll_write_ready(cx).is_pending() {
-                return;
-            }
-
-            let Ok(n) = self.stream.try_write(&self.id_message) else {
-                continue;
-            };
-
-            self.id_message.advance(n);
-        }
+        w.wake_by_ref();
     }
 
-    fn poll_next_message(&mut self) -> Option<(u32, &mut BytesMut)> {
-        let dest = self.pending_message_to?;
-
-        if self.buffer.is_empty() {
-            return None;
+    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.write_buffers.is_empty() {
+            self.waker = Some(cx.waker().clone());
+            return Poll::Pending;
         }
 
-        Some((dest, &mut self.buffer))
-    }
-
-    fn poll_send(&self, cx: &mut Context<'_>, b: &mut BytesMut) -> Poll<bool> {
         loop {
             ready!(self.stream.poll_write_ready(cx)).unwrap();
-            let Ok(n) = self.stream.try_write(message_bytes(b)) else {
+
+            let buffer = self.write_buffers.first_mut().unwrap();
+
+            let Ok(n) = self.stream.try_write(buffer) else {
                 continue;
             };
 
-            let message_end = b[..n].contains(&b'\0');
+            buffer.advance(n);
 
-            b.advance(n);
+            if buffer.is_empty() {
+                self.write_buffers.pop();
+            }
 
-            return Poll::Ready(message_end);
+            return Poll::Ready(());
         }
     }
 
-    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<&mut BytesMut> {
         loop {
             ready!(self.stream.poll_read_ready(cx)).unwrap();
-            let Ok(_) = self.stream.try_read_buf(&mut self.buffer) else {
+            let Ok(_) = self.stream.try_read_buf(&mut self.read_buffer) else {
                 continue;
             };
 
-            if self.pending_message_to.is_some() {
-                return Poll::Ready(());
-            }
-
-            // Either we leave this function
-            if let Ok(dest) = data_dest(&self.buffer) {
-                self.buffer.advance(4);
-                self.pending_message_to = Some(dest);
-                return Poll::Ready(());
-            } else {
-                continue;
-            }
+            return Poll::Ready(&mut self.read_buffer);
         }
     }
 }
 
 struct ParseError;
 
-fn data_dest(message: &[u8]) -> Result<u32, ParseError> {
+fn parse_message(message: &mut BytesMut) -> Result<(u32, Bytes), ParseError> {
     if message.len() < 5 {
         return Err(ParseError);
     }
 
-    Ok(u32::from_be_bytes(message[..4].try_into().unwrap()))
-}
+    let end = message[4..]
+        .iter()
+        .position(|&c| c == b'\0')
+        .ok_or(ParseError)?
+        + 5;
 
-fn message_bytes(buffer: &BytesMut) -> &[u8] {
-    let Some(end) = buffer.iter().position(|&c| c == b'\0') else {
-        return &buffer[..];
-    };
+    let dest: u32 = u32::from_be_bytes(message[..4].try_into().unwrap());
 
-    &buffer[..=end]
+    let data = message.split_to(end).split_off(4).freeze();
+
+    Ok((dest, data))
 }
 
 #[cfg(test)]
