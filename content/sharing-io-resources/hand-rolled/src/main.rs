@@ -26,51 +26,49 @@ impl Server {
     }
 
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        loop {
-            if let Poll::Ready(Ok((connection, _))) = self.listener.poll_accept(cx) {
-                let id = self.connections.len() as u32;
-                let socket = Socket::new(connection, id);
-                self.connections.push(socket);
-                continue;
-            }
-
-            for i in 0..self.connections.len() {
-                let (connections_left, c) = self.connections.split_at_mut(i);
-                let (connection, connections_right) = c.split_at_mut(1);
-                let connection = connection.first_mut().unwrap();
-
-                connection.poll_id_message(cx);
-
-                if connection.poll_read(cx).is_ready() {
-                    // If we're ready we want to immediatley reschedule ourselves
-                    cx.waker().wake_by_ref();
-                };
-
-                let Some((dest, message)) = connection.poll_next_message() else {
-                    continue;
-                };
-
-                let dest = dest as usize;
-
-                let connection_dest = if dest > i {
-                    &connections_right[dest - i - 1]
-                } else {
-                    &connections_left[dest]
-                };
-
-                match connection_dest.poll_send(cx, message) {
-                    Poll::Ready(true) => {
-                        connection.pending_message_to.take();
-                    }
-                    Poll::Ready(false) => {
-                        cx.waker().wake_by_ref();
-                    }
-                    Poll::Pending => {}
-                }
-            }
-
-            return Poll::Pending;
+        if let Poll::Ready(Ok((connection, _))) = self.listener.poll_accept(cx) {
+            let id = self.connections.len() as u32;
+            let socket = Socket::new(connection, id);
+            self.connections.push(socket);
+            cx.waker().wake_by_ref();
         }
+
+        for i in 0..self.connections.len() {
+            let (connections_left, c) = self.connections.split_at_mut(i);
+            let (connection, connections_right) = c.split_at_mut(1);
+            let connection = connection.first_mut().unwrap();
+
+            connection.poll_id_message(cx);
+
+            if connection.poll_read(cx).is_ready() {
+                // If we're ready we want to immediatley reschedule ourselves
+                cx.waker().wake_by_ref();
+            };
+
+            let Some((dest, message)) = connection.poll_next_message() else {
+                continue;
+            };
+
+            let dest = dest as usize;
+
+            let connection_dest = if dest > i {
+                &connections_right[dest - i - 1]
+            } else {
+                &connections_left[dest]
+            };
+
+            let Poll::Ready(message_end) = connection_dest.poll_send(cx, message) else {
+                continue;
+            };
+
+            if message_end {
+                connection.pending_message_to.take();
+            }
+
+            cx.waker().wake_by_ref();
+        }
+
+        Poll::Pending
     }
 
     async fn handle_connections(&mut self) {
