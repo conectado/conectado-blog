@@ -977,7 +977,7 @@ Finally, to expose a nice async interface we use `poll_fn`.
     }
 ```
 
-And there we've it, we're manually polling the futures. If we were handling errors, `poll_send` couuld surface it directly as `Poll<io::Result<()>>`, for example. And then in the main loop we can handle it by doing `self.connection.remove[dest]`[^6].
+And there we've it, we're manually polling the futures. If we were handling errors, `poll_send` could surface it directly as `Poll<io::Result<()>>`, for example. And then in the main loop we can handle it by doing `self.connection.remove[dest]`[^6]. There's also no need to homogenize the return types from the futures as we handle them separatedly.
 
 #### Benefits and drawbacks
 
