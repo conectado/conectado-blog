@@ -74,8 +74,6 @@ We will assume these unrealistic simplifications.
 * Every client is well-behaved and will never abuse the protocol.
   * This means clients will always send complete messages and won't start a new one without finishing the one before.
   * Every message a client sends follows the protocol, and the message always starts with the 4-byte ID of an existing client.
-* OS errors never happen.
-* Once a client connects, it never disconnects.
 * A client will never send a message to itself.
 * Once started, a server will never stop.
 
@@ -230,22 +228,32 @@ impl Server {
     }
 
     async fn handle_connection(&mut self, mut socket: TcpStream) {
-        let id = self.connections.len();
-        socket.write_u32(id as u32).await.unwrap();
+        let id: u32 = rand::rng().random();
+        socket.write_u32(id).await.unwrap();
         socket.flush().await.unwrap();
-        self.connections.push(socket);
+        self.connections.insert(id, socket);
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = self.connections[id].read_buf(&mut buffer).await.unwrap();
-            assert!(n != 0);
+            let Ok(n) = self.connections.get(&id).unwrap().read_buf(&mut buffer).await
+            else {
+                self.connections.remove(&id);
+                break;
+            };
+
+            if n == 0 {
+                self.connections.remove(&id);
+                break;
+            }
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
             };
 
-            self.connections[dest as usize].write_all(&m).await.unwrap();
+            if let Err(e) = self.connections.get(&dest).write_all(&m).await {
+                eprintln!("Failed to write to socket: {e}");
+            }
         }
     }
 }
@@ -262,7 +270,7 @@ But, again, a naive implementation like the following will result in problems.
 ```rs,linenos,hl_lines=27,hl_lines=35,hl_lines=45
 struct Server {
     listener: TcpListener,
-    connections: tokio::sync::Mutex<Vec<TcpStream>>,
+    connections: tokio::sync::Mutex<HashMap<u32, TcpStream>>,
 }
 
 impl Server {
@@ -286,31 +294,49 @@ impl Server {
     }
 
     async fn handle_connection(&self, mut socket: TcpStream) {
-        let id = self.connections.lock().await.len();
-        socket.write_u32(id as u32).await.unwrap();
+        let id: u32 = rand::rng().random();
+        socket.write_u32(id).await.unwrap();
         socket.flush().await.unwrap();
-        self.connections.lock().await.push(socket);
+        self.connections.lock().await.insert(id, socket);
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = self.connections.lock().await[id]
+            let Ok(n) = self
+                .connections
+                .lock()
+                .await
+                .get_mut(&id)
+                .unwrap()
                 .read_buf(&mut buffer)
                 .await
-                .unwrap();
-            assert!(n != 0);
+            else {
+                self.connections.lock().await.remove(&id);
+                break;
+            };
+
+            if n == 0 {
+                self.connections.lock().await.remove(&id);
+                break;
+            }
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
             };
 
-            self.connections.lock().await[dest as usize]
-                .write_all(&m)
-                .await
-                .unwrap();
+            let mut connections = self.connections.lock().await;
+
+            let Some(socket) = connections.get_mut(&dest) else {
+                continue;
+            };
+
+            if let Err(e) = socket.write_all(&m).await {
+                eprintln!("Failed to write to socket {e}");
+            }
         }
     }
 }
+
 ```
 
 If you run `cargo test` now, this will simply deadlock. On line 35 we grab the lock for the client and hold it until the client sends a new message. For our test, the first client to connect doesn't send a message until it receives the ID from the second client. And the second client can't get the ID until it obtains the lock in line 27, so a deadlock.
@@ -321,7 +347,7 @@ We could try to fix this by using a different ID scheme or holding the number of
 ```rs,linenos,hl_lines=47
 struct Server {
     listener: TcpListener,
-    connections: tokio::sync::Mutex<Vec<OwnedWriteHalf>>,
+    connections: tokio::sync::Mutex<HashMap<u32, OwnedWriteHalf>>,
 }
 
 impl Server {
@@ -346,29 +372,38 @@ impl Server {
 
     async fn handle_connection(&self, socket: TcpStream) {
         let (mut read, mut write) = socket.into_split();
-        {
-            let mut connections = self.connections.lock().await;
-            let id = connections.len();
-            write.write_u32(id as u32).await.unwrap();
-            write.flush().await.unwrap();
-            connections.push(write);
-        }
+        let id: u32 = rand::rng().random();
+        write.write_u32(id).await.unwrap();
+        write.flush().await.unwrap();
+        self.connections.lock().await.insert(id, write);
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = read.read_buf(&mut buffer).await.unwrap();
-            assert!(n != 0);
+            let Ok(n) = read.read_buf(&mut buffer).await else {
+                self.connections.lock().await.remove(&id);
+                break;
+            };
+
+            if n == 0 {
+                self.connections.lock().await.remove(&id);
+                break;
+            }
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
             };
 
             let mut connections = self.connections.lock().await;
-            connections[dest as usize].write_all(&m).await.unwrap();
+            let Some(connection) = connections.get_mut(&dest) else {
+                continue;
+            };
+
+            connection.write_all(&m).await.unwrap();
         }
     }
 }
+
 ```
 
 By splitting the socket into a writer and a reader, we only need to hold a `Mutex` for writing; this way we lock in a single place. But this is still pretty bad; a single client can hold the lock for an indefinitely long time. In line 47, if the socket's buffer is full, the `MutexGuard` won't be released until there's room in the buffer. That'll prevent any message from being forwarded to other clients, even when their buffers aren't filled.
@@ -416,14 +451,22 @@ impl Server {
     }
 
     async fn handle_connection(&self, socket: TcpStream) {
+        let id: u32 = rand::rng().random();
         let (mut read, write) = socket.into_split();
-        self.tx.send(Message::New(write)).await.unwrap();
+        self.tx.send(Message::New(id, write)).await.unwrap();
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = read.read_buf(&mut buffer).await.unwrap();
-            assert!(n != 0);
+            let Ok(n) = read.read_buf(&mut buffer).await else {
+                let _ = self.tx.send(Message::Disconnect(id)).await;
+                break;
+            };
+
+            if n == 0 {
+                let _ = self.tx.send(Message::Disconnect(id)).await;
+                break;
+            }
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
@@ -435,24 +478,34 @@ impl Server {
 }
 
 async fn message_dispatcher(mut rx: mpsc::Receiver<Message>) {
-    let mut connections = Vec::new();
+    let mut connections = HashMap::new();
     while let Some(msg) = rx.recv().await {
         match msg {
-            Message::New(mut connection) => {
-                let id = connections.len();
-                connection.write_u32(id as u32).await.unwrap();
-                connections.push(connection);
+            Message::New(id, mut connection) => {
+                if let Err(e) = connection.write_u32(id).await {
+                    eprintln!("Failed to write to socket: {e}");
+                };
+                connections.insert(id, connection);
             }
             Message::Send(id, items) => {
-                connections[id as usize].write_all(&items).await.unwrap();
+                let Some(connection) = connections.get_mut(&id) else {
+                    continue;
+                };
+                if let Err(e) = connection.write_all(&items).await {
+                    eprintln!("Failed to write to socket: {e}");
+                }
+            }
+            Message::Disconnect(id) => {
+                connections.remove(&id);
             }
         }
     }
 }
 
 enum Message {
-    New(OwnedWriteHalf),
+    New(u32, OwnedWriteHalf),
     Send(u32, Bytes),
+    Disconnect(u32),
 }
 ```
 
@@ -464,21 +517,28 @@ A better solution is to have a single task owning each writer, in this way:
 
 ```rs
 async fn central_dispatcher(mut rx: mpsc::Receiver<Message>) {
-    let mut writers = Vec::new();
+    let mut connections = HashMap::new();
     while let Some(msg) = rx.recv().await {
         match msg {
-            Message::New(connection) => {
+            Message::New(id, connection) => {
                 let (tx, rx) = mpsc::channel(100);
 
-                tokio::spawn(client_dispatcher(connection, rx));
-                let id = writers.len();
-                tx.send(Bytes::from_owner((id as u32).to_be_bytes()))
-                    .await
-                    .unwrap();
-                writers.push(tx);
+                let handle = tokio::spawn(client_dispatcher(connection, rx)).abort_handle();
+                tx.send(Bytes::from_owner(id.to_be_bytes())).await.unwrap();
+                connections.insert(id, (tx, handle));
             }
             Message::Send(id, items) => {
-                writers[id as usize].send(items).await.unwrap();
+                let Some((connection, _)) = connections.get_mut(&id) else {
+                    continue;
+                };
+                if let Err(e) = connection.send(items).await {
+                    eprintln!("Failed to write to socket: {e}");
+                }
+            }
+            Message::Disconnect(id) => {
+                if let Some((_, handle)) = connections.remove(&id) {
+                    handle.abort();
+                }
             }
         }
     }
@@ -487,7 +547,10 @@ async fn central_dispatcher(mut rx: mpsc::Receiver<Message>) {
 async fn client_dispatcher(mut connection: OwnedWriteHalf, mut rx: mpsc::Receiver<Bytes>) {
     loop {
         let m = rx.recv().await.unwrap();
-        connection.write_all(&m).await.unwrap();
+        if let Err(e) = connection.write_all(&m).await {
+            eprintln!("Failed to write to socket: {e}");
+            break;
+        }
     }
 }
 ```
@@ -502,24 +565,32 @@ We can instead use `try_send`, which isn't blocking, and manage our own bufferin
 
 ```rs
         match msg {
-            Message::New(connection) => {
+            Message::New(id, connection) => {
                 let (tx, rx) = mpsc::channel(100);
 
-                let w = tx.clone();
-                let id = writers.len();
-                tokio::spawn(client_dispatcher(connection, rx));
-                tokio::spawn(async move {
-                    w.send(Bytes::from_owner((id as u32).to_be_bytes()))
-                        .await
-                        .unwrap();
+                let handle = tokio::spawn(client_dispatcher(connection, rx)).abort_handle();
+                let connection = tx.clone();
+                connections.insert(id, (tx, handle));
+                tokio::spawn(async {
+                    connection.send(Bytes::from_owner(id.to_be_bytes())).await.unwrap();
                 });
-                writers.push(tx);
             }
             Message::Send(id, items) => {
-                let w = writers[id as usize].clone();
-                tokio::spawn(async move {
-                    w.send(items).await.unwrap();
+                let Some((connection, _)) = connections.get_mut(&id) else {
+                    continue;
+                };
+
+                let connection = connection.clone();
+                tokio::spawn(async {
+                    if let Err(e) = connection.send(items).await {
+                        eprintln!("Failed to write to socket: {e}");
+                    }
                 });
+            }
+            Message::Disconnect(id) => {
+                if let Some((_, handle)) = connections.remove(&id) {
+                    handle.abort();
+                }
             }
         }
 ```
@@ -535,33 +606,35 @@ All these channels and tasks add complexity. For one, tasks need to be managed a
 Take a look again at our `central_dispatcher`.
 
 ```rs
-async fn central_dispatcher(mut rx: mpsc::Receiver<Message>) {
-    let mut writers = Vec::new();
-    while let Some(msg) = rx.recv().await {
         match msg {
-            Message::New(connection) => {
+            Message::New(id, connection) => {
                 let (tx, rx) = mpsc::channel(100);
 
-                let w = tx.clone();
-                let id = writers.len();
-                tokio::spawn(client_dispatcher(connection, rx));
-                tokio::spawn(async move {
-                    w.send(Bytes::from_owner((id as u32).to_be_bytes()))
-                        .await
-                        .unwrap();
+                let handle = tokio::spawn(client_dispatcher(connection, rx)).abort_handle();
+                let connection = tx.clone();
+                connections.insert(id, (tx, handle));
+                tokio::spawn(async {
+                    connection.send(Bytes::from_owner(id.to_be_bytes())).await.unwrap();
                 });
-                writers.push(tx);
             }
             Message::Send(id, items) => {
-                let w = writers[id as usize].clone();
-                tokio::spawn(async move {
-                    w.send(items).await.unwrap();
+                let Some((connection, _)) = connections.get_mut(&id) else {
+                    continue;
+                };
+
+                let connection = connection.clone();
+                tokio::spawn(async {
+                    if let Err(e) = connection.send(items).await {
+                        eprintln!("Failed to write to socket: {e}");
+                    }
                 });
             }
+            Message::Disconnect(id) => {
+                if let Some((_, handle)) = connections.remove(&id) {
+                    handle.abort();
+                }
+            }
         }
-    }
-}
-
 ```
 
 There's no way to know where `rx` comes from other than looking for the place where the channel is created, which can be very far up the stack. Then, to know where `Message` can be produced, you need to look at all the places where the corresponding `tx` moves to, which again can be very far down the stack.
@@ -660,48 +733,62 @@ enum Event<'a> {
 
 This is similar to the `Message` enum we had before, but the `Read` variant doesn't contain the parsed message; instead, it has the raw bytes from the socket. The parsing will be done after the event is generated.
 
+```rs
+type Result<T> = std::result::Result<T, (io::Error, u32)>;
+```
+
 Now, this socket abstraction makes it all come together. Let's take a look at it.
 
 ```rs
 struct ReadSocket {
     buffer: BytesMut,
     reader: OwnedReadHalf,
+    id: u32,
 }
 
 impl ReadSocket {
-    fn new(reader: OwnedReadHalf) -> ReadSocket {
+    fn new(reader: OwnedReadHalf, id: u32) -> ReadSocket {
         ReadSocket {
             buffer: BytesMut::new(),
             reader,
+            id,
         }
     }
 
-    async fn read(&mut self) -> Event {
-        self.reader.read_buf(&mut self.buffer).await.unwrap();
-        Event::Read(&mut self.buffer)
+    async fn read(&mut self) -> Result<Event> {
+        self.reader
+            .read_buf(&mut self.buffer)
+            .await
+            .map_err(|e| (e, self.id))?;
+        Ok(Event::Read(&mut self.buffer))
     }
 }
 
 struct WriteSocket {
     buffer: BytesMut,
     writer: OwnedWriteHalf,
+    id: u32,
 }
 
 impl WriteSocket {
-    fn new(writer: OwnedWriteHalf) -> WriteSocket {
+    fn new(writer: OwnedWriteHalf, id: u32) -> WriteSocket {
         WriteSocket {
             buffer: BytesMut::new(),
             writer,
+            id,
         }
     }
 
-    async fn advance_send(&mut self) -> Event {
+    async fn advance_send(&mut self) -> Result<Event> {
         loop {
             if !self.buffer.has_remaining() {
-                std::future::pending::<Infallible>().await;
+                std::future::pending::<Event>().await;
             }
 
-            self.writer.write_all_buf(&mut self.buffer).await.unwrap();
+            self.writer
+                .write_all_buf(&mut self.buffer)
+                .await
+                .map_err(|e| (e, self.id))?;
         }
     }
 
@@ -722,11 +809,11 @@ Now, if we were to simply `await` on `advance_send`, that would block a task for
 With these new structs in place, we need need to know how we "wait for the next event".
 
 ```rs
-    fn next_event(&mut self) -> impl Future<Output = Event> {
+    fn next_event(&mut self) -> impl Future<Output = Result<Event>> {
         let listen = self
             .listener
             .accept()
-            .map(|stream| Event::Connection(stream.unwrap().0));
+            .map(|stream| Ok(Event::Connection(stream.unwrap().0)));
 
         // Neither `Race` nor `select_all` works with empty vectors
         if self.read_connections.is_empty() {
@@ -735,20 +822,21 @@ With these new structs in place, we need need to know how we "wait for the next 
 
         let reads = self
             .read_connections
-            .iter_mut()
+            .values_mut()
             .map(|reader| reader.read())
             .collect::<Vec<_>>()
             .race();
 
         let writes = self
             .write_connections
-            .iter_mut()
+            .values_mut()
             .map(|write| write.advance_send())
             .collect::<Vec<_>>()
             .race();
 
         (listen, reads, writes).race().boxed()
     }
+
 ```
 
 When there are no connections yet, the only possible event is a new connection emitted by the `listener`. Otherwise, we `race` among all the futures from all writers, readers, and the listener, and emit an event based on the first one to finish. [`race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html#tymethod.race) is a method provided by the `Race` trait. `race` is also fair[^4][^5], in the sense that none of the futures will hog the executor.
@@ -757,22 +845,36 @@ With this `next_event` in place, we can now handle all events concurrently in a 
 
 
 ```rs
-    async fn handle_connections(&mut self) {
+    pub async fn handle_connections(&mut self) {
         loop {
             let ev = self.next_event().await;
+            let ev = match ev {
+                Ok(ev) => ev,
+                Err((e, i)) => {
+                    eprintln!("Socket error: {e}");
+                    self.read_connections.remove(&i);
+                    self.write_connections.remove(&i);
+                    continue;
+                }
+            };
+
             match ev {
                 Event::Read(bytes_mut) => {
                     let Ok((i, d)) = parse_message(bytes_mut) else {
                         continue;
                     };
-                    self.write_connections[i as usize].send(&d);
+                    let Some(writer) = self.write_connections.get_mut(&i) else {
+                        continue;
+                    };
+                    writer.send(&d);
                 }
                 Event::Connection(tcp_stream) => {
+                    let id = rand::rng().random();
                     let (r, w) = tcp_stream.into_split();
-                    let mut write_sock = WriteSocket::new(w);
-                    write_sock.send(&(self.write_connections.len() as u32).to_be_bytes());
-                    self.read_connections.push(ReadSocket::new(r));
-                    self.write_connections.push(write_sock);
+                    let mut write_sock = WriteSocket::new(w, id);
+                    write_sock.send(&id.to_be_bytes());
+                    self.read_connections.insert(id, ReadSocket::new(r, id));
+                    self.write_connections.insert(id, write_sock);
                 }
             }
         }
@@ -787,24 +889,29 @@ Yet, we can go further down this path. First, let's get something out of the way
 struct WriteSocket {
     buffers: VecDeque<Bytes>,
     writer: OwnedWriteHalf,
+    id: u32,
 }
 
 impl WriteSocket {
-    fn new(writer: OwnedWriteHalf) -> WriteSocket {
+    fn new(writer: OwnedWriteHalf, id: u32) -> WriteSocket {
         WriteSocket {
             buffers: VecDeque::new(),
             writer,
+            id,
         }
     }
 
-    async fn advance_send(&mut self) -> Event {
+    async fn advance_send(&mut self) -> Result<Event> {
         loop {
             let Some(buffer) = self.buffers.front_mut() else {
                 std::future::pending::<Infallible>().await;
                 unreachable!();
             };
 
-            self.writer.write_all_buf(buffer).await.unwrap();
+            self.writer
+                .write_all_buf(buffer)
+                .await
+                .map_err(|e| (e, self.id))?;
 
             self.buffers.pop_front();
         }
@@ -817,25 +924,38 @@ impl WriteSocket {
 ```
 
 Now, `send` no longer copies data; instead, it keeps it in an internal vector. Then with a slight modification to `handle_connection` we can make this all work.
+
 ```rs
     pub async fn handle_connections(&mut self) {
         loop {
             let ev = self.next_event().await;
+            let ev = match ev {
+                Ok(ev) => ev,
+                Err((e, i)) => {
+                    eprintln!("Socket error: {e}");
+                    self.read_connections.remove(&i);
+                    self.write_connections.remove(&i);
+                    continue;
+                }
+            };
+
             match ev {
                 Event::Read(bytes_mut) => {
                     let Ok((i, d)) = parse_message(bytes_mut) else {
                         continue;
                     };
-                    self.write_connections[i as usize].send(d);
+                    let Some(writer) = self.write_connections.get_mut(&i) else {
+                        continue;
+                    };
+                    writer.send(d);
                 }
                 Event::Connection(tcp_stream) => {
+                    let id = rand::rng().random();
                     let (r, w) = tcp_stream.into_split();
-                    let mut write_sock = WriteSocket::new(w);
-                    write_sock.send(Bytes::from_owner(
-                        (self.write_connections.len() as u32).to_be_bytes(),
-                    ));
-                    self.read_connections.push(ReadSocket::new(r));
-                    self.write_connections.push(write_sock);
+                    let mut write_sock = WriteSocket::new(w, id);
+                    write_sock.send(Bytes::from_owner(id.to_be_bytes()));
+                    self.read_connections.insert(id, ReadSocket::new(r, id));
+                    self.write_connections.insert(id, write_sock);
                 }
             }
         }
@@ -880,39 +1000,49 @@ impl Socket {
         w.wake_by_ref();
     }
 
-    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        if self.write_buffers.is_empty() {
+    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let Some(write_buffer) = self.write_buffers.front_mut() else {
             self.waker = Some(cx.waker().clone());
             return Poll::Pending;
-        }
+        };
 
         loop {
-            ready!(self.stream.poll_write_ready(cx)).unwrap();
+            ready!(self.stream.poll_write_ready(cx))?;
 
-            let buffer = self.write_buffers.front_mut().unwrap();
+            match self.stream.try_write(write_buffer) {
+                Ok(n) => {
+                    write_buffer.advance(n);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    return Poll::Ready(Err(e));
+                }
+            }
 
-            let Ok(n) = self.stream.try_write(buffer) else {
-                continue;
-            };
-
-            buffer.advance(n);
-
-            if buffer.is_empty() {
+            if write_buffer.is_empty() {
                 self.write_buffers.pop_front();
             }
 
-            return Poll::Ready(());
+            return Poll::Ready(Ok(()));
         }
     }
 
-    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<&mut BytesMut> {
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<&mut BytesMut>> {
         loop {
-            ready!(self.stream.poll_read_ready(cx)).unwrap();
-            let Ok(_) = self.stream.try_read_buf(&mut self.read_buffer) else {
-                continue;
+            ready!(self.stream.poll_read_ready(cx))?;
+            match self.stream.try_read_buf(&mut self.read_buffer) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    return Poll::Ready(Err(e));
+                }
             };
 
-            return Poll::Ready(&mut self.read_buffer);
+            return Poll::Ready(Ok(&mut self.read_buffer));
         }
     }
 }

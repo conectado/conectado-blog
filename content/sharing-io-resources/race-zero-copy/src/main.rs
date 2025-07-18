@@ -1,9 +1,10 @@
-use std::collections::VecDeque;
-use std::convert::Infallible;
-
 use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use futures_concurrency::future::Race;
+use rand::Rng;
+use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
+use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -15,8 +16,8 @@ async fn main() {
 }
 
 struct Server {
-    read_connections: Vec<ReadSocket>,
-    write_connections: Vec<WriteSocket>,
+    read_connections: HashMap<u32, ReadSocket>,
+    write_connections: HashMap<u32, WriteSocket>,
     listener: TcpListener,
 }
 
@@ -30,17 +31,17 @@ impl Server {
     async fn new() -> Server {
         let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
         Server {
-            read_connections: vec![],
-            write_connections: vec![],
+            read_connections: HashMap::new(),
+            write_connections: HashMap::new(),
             listener,
         }
     }
 
-    fn next_event(&mut self) -> impl Future<Output = Event> {
+    fn next_event(&mut self) -> impl Future<Output = Result<Event>> {
         let listen = self
             .listener
             .accept()
-            .map(|stream| Event::Connection(stream.unwrap().0));
+            .map(|stream| Ok(Event::Connection(stream.unwrap().0)));
 
         // Neither `Race` nor `select_all` works with empty vectors
         if self.read_connections.is_empty() {
@@ -49,14 +50,14 @@ impl Server {
 
         let reads = self
             .read_connections
-            .iter_mut()
+            .values_mut()
             .map(|reader| reader.read())
             .collect::<Vec<_>>()
             .race();
 
         let writes = self
             .write_connections
-            .iter_mut()
+            .values_mut()
             .map(|write| write.advance_send())
             .collect::<Vec<_>>()
             .race();
@@ -67,67 +68,91 @@ impl Server {
     pub async fn handle_connections(&mut self) {
         loop {
             let ev = self.next_event().await;
+            let ev = match ev {
+                Ok(ev) => ev,
+                Err((e, i)) => {
+                    eprintln!("Socket error: {e}");
+                    self.read_connections.remove(&i);
+                    self.write_connections.remove(&i);
+                    continue;
+                }
+            };
+
             match ev {
                 Event::Read(bytes_mut) => {
                     let Ok((i, d)) = parse_message(bytes_mut) else {
                         continue;
                     };
-                    self.write_connections[i as usize].send(d);
+                    let Some(writer) = self.write_connections.get_mut(&i) else {
+                        continue;
+                    };
+                    writer.send(d);
                 }
                 Event::Connection(tcp_stream) => {
+                    let id = rand::rng().random();
                     let (r, w) = tcp_stream.into_split();
-                    let mut write_sock = WriteSocket::new(w);
-                    write_sock.send(Bytes::from_owner(
-                        (self.write_connections.len() as u32).to_be_bytes(),
-                    ));
-                    self.read_connections.push(ReadSocket::new(r));
-                    self.write_connections.push(write_sock);
+                    let mut write_sock = WriteSocket::new(w, id);
+                    write_sock.send(Bytes::from_owner(id.to_be_bytes()));
+                    self.read_connections.insert(id, ReadSocket::new(r, id));
+                    self.write_connections.insert(id, write_sock);
                 }
             }
         }
     }
 }
 
+type Result<T> = std::result::Result<T, (io::Error, u32)>;
+
 struct ReadSocket {
     buffer: BytesMut,
     reader: OwnedReadHalf,
+    id: u32,
 }
 
 impl ReadSocket {
-    fn new(reader: OwnedReadHalf) -> ReadSocket {
+    fn new(reader: OwnedReadHalf, id: u32) -> ReadSocket {
         ReadSocket {
             buffer: BytesMut::new(),
             reader,
+            id,
         }
     }
 
-    async fn read(&mut self) -> Event {
-        self.reader.read_buf(&mut self.buffer).await.unwrap();
-        Event::Read(&mut self.buffer)
+    async fn read(&mut self) -> Result<Event> {
+        self.reader
+            .read_buf(&mut self.buffer)
+            .await
+            .map_err(|e| (e, self.id))?;
+        Ok(Event::Read(&mut self.buffer))
     }
 }
 
 struct WriteSocket {
     buffers: VecDeque<Bytes>,
     writer: OwnedWriteHalf,
+    id: u32,
 }
 
 impl WriteSocket {
-    fn new(writer: OwnedWriteHalf) -> WriteSocket {
+    fn new(writer: OwnedWriteHalf, id: u32) -> WriteSocket {
         WriteSocket {
             buffers: VecDeque::new(),
             writer,
+            id,
         }
     }
 
-    async fn advance_send(&mut self) -> Event {
+    async fn advance_send(&mut self) -> Result<Event> {
         loop {
             let Some(buffer) = self.buffers.front_mut() else {
                 std::future::pending::<Infallible>().await;
                 unreachable!();
             };
 
-            self.writer.write_all_buf(buffer).await.unwrap();
+            self.writer
+                .write_all_buf(buffer)
+                .await
+                .map_err(|e| (e, self.id))?;
 
             self.buffers.pop_front();
         }
@@ -140,7 +165,7 @@ impl WriteSocket {
 
 struct ParseError;
 
-fn parse_message(message: &mut BytesMut) -> Result<(u32, Bytes), ParseError> {
+fn parse_message(message: &mut BytesMut) -> std::result::Result<(u32, Bytes), ParseError> {
     if message.len() < 5 {
         return Err(ParseError);
     }

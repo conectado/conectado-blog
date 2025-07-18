@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use bytes::BytesMut;
+use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 #[tokio::main]
@@ -12,7 +14,7 @@ async fn main() {
 
 struct Server {
     listener: TcpListener,
-    connections: tokio::sync::Mutex<Vec<TcpStream>>,
+    connections: tokio::sync::Mutex<HashMap<u32, TcpStream>>,
 }
 
 impl Server {
@@ -36,28 +38,45 @@ impl Server {
     }
 
     async fn handle_connection(&self, mut socket: TcpStream) {
-        let id = self.connections.lock().await.len();
-        socket.write_u32(id as u32).await.unwrap();
+        let id: u32 = rand::rng().random();
+        socket.write_u32(id).await.unwrap();
         socket.flush().await.unwrap();
-        self.connections.lock().await.push(socket);
+        self.connections.lock().await.insert(id, socket);
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = self.connections.lock().await[id]
+            let Ok(n) = self
+                .connections
+                .lock()
+                .await
+                .get_mut(&id)
+                .unwrap()
                 .read_buf(&mut buffer)
                 .await
-                .unwrap();
-            assert!(n != 0);
+            else {
+                self.connections.lock().await.remove(&id);
+                break;
+            };
+
+            if n == 0 {
+                self.connections.lock().await.remove(&id);
+                break;
+            }
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
             };
 
-            self.connections.lock().await[dest as usize]
-                .write_all(&m)
-                .await
-                .unwrap();
+            let mut connections = self.connections.lock().await;
+
+            let Some(socket) = connections.get_mut(&dest) else {
+                continue;
+            };
+
+            if let Err(e) = socket.write_all(&m).await {
+                eprintln!("Failed to write to socket {e}");
+            }
         }
     }
 }

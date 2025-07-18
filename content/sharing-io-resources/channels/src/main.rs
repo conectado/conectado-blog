@@ -1,5 +1,7 @@
 use bytes::Bytes;
 use bytes::BytesMut;
+use rand::Rng;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
@@ -36,14 +38,22 @@ impl Server {
     }
 
     async fn handle_connection(&self, socket: TcpStream) {
+        let id: u32 = rand::rng().random();
         let (mut read, write) = socket.into_split();
-        self.tx.send(Message::New(write)).await.unwrap();
+        self.tx.send(Message::New(id, write)).await.unwrap();
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = read.read_buf(&mut buffer).await.unwrap();
-            assert!(n != 0);
+            let Ok(n) = read.read_buf(&mut buffer).await else {
+                let _ = self.tx.send(Message::Disconnect(id)).await;
+                break;
+            };
+
+            if n == 0 {
+                let _ = self.tx.send(Message::Disconnect(id)).await;
+                break;
+            }
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
@@ -55,24 +65,34 @@ impl Server {
 }
 
 async fn message_dispatcher(mut rx: mpsc::Receiver<Message>) {
-    let mut connections = Vec::new();
+    let mut connections = HashMap::new();
     while let Some(msg) = rx.recv().await {
         match msg {
-            Message::New(mut connection) => {
-                let id = connections.len();
-                connection.write_u32(id as u32).await.unwrap();
-                connections.push(connection);
+            Message::New(id, mut connection) => {
+                if let Err(e) = connection.write_u32(id).await {
+                    eprintln!("Failed to write to socket: {e}");
+                };
+                connections.insert(id, connection);
             }
             Message::Send(id, items) => {
-                connections[id as usize].write_all(&items).await.unwrap();
+                let Some(connection) = connections.get_mut(&id) else {
+                    continue;
+                };
+                if let Err(e) = connection.write_all(&items).await {
+                    eprintln!("Failed to write to socket: {e}");
+                }
+            }
+            Message::Disconnect(id) => {
+                connections.remove(&id);
             }
         }
     }
 }
 
 enum Message {
-    New(OwnedWriteHalf),
+    New(u32, OwnedWriteHalf),
     Send(u32, Bytes),
+    Disconnect(u32),
 }
 
 struct ParseError;

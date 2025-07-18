@@ -1,5 +1,7 @@
 use bytes::Bytes;
 use bytes::BytesMut;
+use rand::Rng;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
@@ -12,7 +14,7 @@ async fn main() {
 
 struct Server {
     listener: TcpListener,
-    connections: tokio::sync::Mutex<Vec<OwnedWriteHalf>>,
+    connections: tokio::sync::Mutex<HashMap<u32, OwnedWriteHalf>>,
 }
 
 impl Server {
@@ -37,26 +39,34 @@ impl Server {
 
     async fn handle_connection(&self, socket: TcpStream) {
         let (mut read, mut write) = socket.into_split();
-        {
-            let mut connections = self.connections.lock().await;
-            let id = connections.len();
-            write.write_u32(id as u32).await.unwrap();
-            write.flush().await.unwrap();
-            connections.push(write);
-        }
+        let id: u32 = rand::rng().random();
+        write.write_u32(id).await.unwrap();
+        write.flush().await.unwrap();
+        self.connections.lock().await.insert(id, write);
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = read.read_buf(&mut buffer).await.unwrap();
-            assert!(n != 0);
+            let Ok(n) = read.read_buf(&mut buffer).await else {
+                self.connections.lock().await.remove(&id);
+                break;
+            };
+
+            if n == 0 {
+                self.connections.lock().await.remove(&id);
+                break;
+            }
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
             };
 
             let mut connections = self.connections.lock().await;
-            connections[dest as usize].write_all(&m).await.unwrap();
+            let Some(connection) = connections.get_mut(&dest) else {
+                continue;
+            };
+
+            connection.write_all(&m).await.unwrap();
         }
     }
 }

@@ -3,6 +3,8 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use std::collections::VecDeque;
 use std::future::poll_fn;
+use std::io;
+use std::io::ErrorKind;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
@@ -44,7 +46,7 @@ impl Server {
         }
 
         for i in 0..self.connections.len() {
-            let Poll::Ready(buf) = self.connections[i].poll_read(cx) else {
+            let Poll::Ready(Ok(buf)) = self.connections[i].poll_read(cx) else {
                 continue;
             };
 
@@ -91,39 +93,49 @@ impl Socket {
         w.wake_by_ref();
     }
 
-    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        if self.write_buffers.is_empty() {
+    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let Some(write_buffer) = self.write_buffers.front_mut() else {
             self.waker = Some(cx.waker().clone());
             return Poll::Pending;
-        }
+        };
 
         loop {
-            ready!(self.stream.poll_write_ready(cx)).unwrap();
+            ready!(self.stream.poll_write_ready(cx))?;
 
-            let buffer = self.write_buffers.front_mut().unwrap();
+            match self.stream.try_write(write_buffer) {
+                Ok(n) => {
+                    write_buffer.advance(n);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    return Poll::Ready(Err(e));
+                }
+            }
 
-            let Ok(n) = self.stream.try_write(buffer) else {
-                continue;
-            };
-
-            buffer.advance(n);
-
-            if buffer.is_empty() {
+            if write_buffer.is_empty() {
                 self.write_buffers.pop_front();
             }
 
-            return Poll::Ready(());
+            return Poll::Ready(Ok(()));
         }
     }
 
-    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<&mut BytesMut> {
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<&mut BytesMut>> {
         loop {
-            ready!(self.stream.poll_read_ready(cx)).unwrap();
-            let Ok(_) = self.stream.try_read_buf(&mut self.read_buffer) else {
-                continue;
+            ready!(self.stream.poll_read_ready(cx))?;
+            match self.stream.try_read_buf(&mut self.read_buffer) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    return Poll::Ready(Err(e));
+                }
             };
 
-            return Poll::Ready(&mut self.read_buffer);
+            return Poll::Ready(Ok(&mut self.read_buffer));
         }
     }
 }
