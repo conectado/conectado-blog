@@ -47,7 +47,7 @@ To show this, I introduce a simple example that we will evolve with different mo
 
 ## The toy problem
 
-This is a small and simplified, yet almost realistic, scenario. I've picked some artificial constraints just to save us from some error handling and a few extra code paths. This way we can focus on the core of the issue, namely, sharing mutable state in concurrent code.
+This is a small and simplified, yet almost realistic, scenario. I've picked some artificial constraints just to save us from writing a few extra lines. This way we can focus on the core of the issue, namely, sharing mutable state in concurrent code.
 
 We will be writing a server that clients can connect to and subsequently exchange messages between them through it.
 
@@ -55,17 +55,17 @@ We will be writing a server that clients can connect to and subsequently exchang
 
 <!-- Diagram of the problem -->
 
-Clients will connect to the server over a TCP socket, then they will immediately be assigned an id, which will be sent back as a 4-byte response.
+Clients will connect to the server over a TCP socket, then they will immediately be assigned an ID, which will be sent back as a 4-byte response.
 
 <!-- Diagram of the ID message -->
 
-The clients can exchange this ID over a side channel, then use the other client's ID to craft a message to be forwarded by the server to the client with that assigned ID.
+The clients can exchange this ID over an out-of-band channel, then use the other client's ID to craft a message to be forwarded by the server to the client with that assigned ID.
 
 <!-- Diagram of the Message -->
 
-The crafted message is composed of the other receiving client's ID followed by a nul-terminated stream of bytes.
+The crafted message is composed of the other receiving client's ID followed by a null-terminated stream of bytes.
 
-Once a complete message is read by the server, it will forward the nul-terminated stream of bytes to the corresponding peer, without including the ID header. 
+Once a complete message is read by the server, it will forward the null-terminated stream of bytes to the corresponding peer, without including the ID header. 
 
 <!-- Full sequence diagram -->
 
@@ -76,6 +76,7 @@ We will assume these unrealistic simplifications.
   * Every message a client sends follows the protocol, and the message always starts with the 4-byte ID of an existing client.
 * A client will never send a message to itself.
 * Once started, a server will never stop.
+* Random u32 IDs will never overlap.
 
 This protocol could cause the clients to receive segmented messages from different clients without the possibility to distinguish between them, but let's ignore that too.
 
@@ -85,7 +86,7 @@ We can easily identify that we need some kind of concurrency to react either to 
 
 This can be done with threads, manually with OS functions, or with an async runtime. Since we are writing an IO-bound application, we will go for an async runtime, `tokio` in this case.
 
-Having established that, let's move on to the details.
+Having established the scene, let's move on to the details.
 
 ## Tests
 
@@ -167,7 +168,7 @@ Before moving on to the specifics, we'll move on to a common parsing function us
 
 We will use the `bytes` crate as it'll allow us to manipulate the messages with less copying, and although it'll not be our focus, I want to discuss some points on copying.
 
-This function will work by taking the bytes of the incoming message and trying to parse them according to the protocol. If successful, it'll return a tuple of `(<id>, <bytes>)` with the bytes for the message with the intended recipient, consuming the bytes corresponding to the message from the original buffer. Otherwise, it'll return an error and leave the original buffer intact It will only parse a single message at a time. 
+This function will work by taking the bytes of the incoming message and trying to parse them according to the protocol. If successful, it'll return a tuple of `(<id>, <bytes>)` with the bytes for the message with the intended recipient, consuming the bytes corresponding to the message from the original buffer. Otherwise, it'll return an error and leave the original buffer intact. It will only parse a single message at a time.
 
 ```rs
 struct ParseError;
@@ -198,14 +199,13 @@ Now let's go to the first implementation using `Mutex` to share sockets.
 
 ### Mutex
 
-{{ note(body="The code for this example can be found in the [mutex](./mutex) directory") }}
 
-If tries to implement the `handle_connections` naively without any synchronization, like this.
+Naively trying to implement the `handle_connections` method without any synchronization, like this.
 
-```rs,linenos,hl_lines=20
+```rs,linenos,hl_lines=19-21,hl_lines=17
 struct Server {
     listener: TcpListener,
-    connections: Vec<TcpStream>,
+    connections: HashMap<u32, TcpStream>,
 }
 
 impl Server {
@@ -228,7 +228,7 @@ impl Server {
     }
 
     async fn handle_connection(&mut self, mut socket: TcpStream) {
-        let id: u32 = rand::rng().random();
+        let id = rand::rng().random();
         socket.write_u32(id).await.unwrap();
         socket.flush().await.unwrap();
         self.connections.insert(id, socket);
@@ -236,7 +236,12 @@ impl Server {
         let mut buffer = BytesMut::new();
 
         loop {
-            let Ok(n) = self.connections.get(&id).unwrap().read_buf(&mut buffer).await
+            let Ok(n) = self
+                .connections
+                .get_mut(&id)
+                .unwrap()
+                .read_buf(&mut buffer)
+                .await
             else {
                 self.connections.remove(&id);
                 break;
@@ -251,23 +256,29 @@ impl Server {
                 continue;
             };
 
-            if let Err(e) = self.connections.get(&dest).write_all(&m).await {
-                eprintln!("Failed to write to socket: {e}");
+            let Some(socket) = self.connections.get_mut(&dest) else {
+                continue;
+            };
+
+            if let Err(e) = socket.write_all(&m).await {
+                eprintln!("Failed to write to socket {e}");
             }
         }
     }
 }
 ```
 
-The compiler is quick to point out that in line 21 `self` is borrowed for a `'static` lifetime, which escapes the scope of `handle_connection`. Furthermore, in line 18, `self` is used after being moved.
+{% note() %}
+The code for this example can be found in the {{ github(file="content/sharing-io-resources/naive") }} directory
+{% end %}
 
-This means we need both multi-thread reference counting and internal-mutability so `Arc<Mutex<T>>` it is.
+Leads the compiler to be quick to point out that in line 19 `self` is borrowed for a `'static` lifetime, which escapes the scope of `handle_connection`. Furthermore, in line 18, `self` is used after it was moved in the previous iteration of the loop.
 
-There are a few ways to implement this; we can just wrap `connections` or the whole struct. I'll just use an `Arc` for the whole struct, so we can move `self` into the new task, and a `Mutex` on connections so we can just lock on that shared vector. If one tries to do this with a conventional `std::sync::Mutex` the compiler will disallow it. Since we need to hold the lock while we send a message, we need to use Tokio's `Mutex`.
+This means we need both asynchronous reference counting and internal mutability, so `Arc<Mutex<T>>` it is. If one tries to do this with a conventional `std::sync::Mutex`, the compiler will disallow it; since we need to hold the lock while we send a message, we need to use Tokio's `Mutex`.
 
-But, again, a naive implementation like the following will result in problems.
+But, again, just wrapping the connections with a mutex, like in the following implementation, will result in problems.
 
-```rs,linenos,hl_lines=27,hl_lines=35,hl_lines=45
+```rs,linenos,hl_lines=35-42,hl_lines=57
 struct Server {
     listener: TcpListener,
     connections: tokio::sync::Mutex<HashMap<u32, TcpStream>>,
@@ -339,12 +350,17 @@ impl Server {
 
 ```
 
-If you run `cargo test` now, this will simply deadlock. On line 35 we grab the lock for the client and hold it until the client sends a new message. For our test, the first client to connect doesn't send a message until it receives the ID from the second client. And the second client can't get the ID until it obtains the lock in line 27, so a deadlock.
+{% note() %}
+The code for this example can be found in the {{ github(file="content/sharing-io-resources/deadlock-mutex") }} directory
+{% end %}
 
-We could try to fix this by using a different ID scheme or holding the number of clients in a different variable. Even with that refactor, there are plenty of conditions for deadlocks between lines 35 and 45. Instead, the more correct implementation will look like this.
+Once a task locks a mutex for reading from the socket, it'll prevent any other socket from being read or written, causing a deadlock. So even if the program compiles, the test hangs forever.
 
+<!-- Diagram here perhaps? -->
 
-```rs,linenos,hl_lines=47
+We can fix this by noting that we only need to share the write side of the socket:
+
+```rs,linenos,hl_lines=55
 struct Server {
     listener: TcpListener,
     connections: tokio::sync::Mutex<HashMap<u32, OwnedWriteHalf>>,
@@ -406,13 +422,17 @@ impl Server {
 
 ```
 
-By splitting the socket into a writer and a reader, we only need to hold a `Mutex` for writing; this way we lock in a single place. But this is still pretty bad; a single client can hold the lock for an indefinitely long time. In line 47, if the socket's buffer is full, the `MutexGuard` won't be released until there's room in the buffer. That'll prevent any message from being forwarded to other clients, even when their buffers aren't filled.
+{% note() %}
+The code for this example can be found in the {{ github(file="content/sharing-io-resources/mutex") }} directory
+{% end %}
 
-You could try to fix this by wrapping every writer with an `Arc<Mutex<OwnedWriteHalf>>`, but this keeps adding to the complexity and potential pitfalls. Hopefully, this already illustrates how bad it can get with `Mutex`; correctly using them is being proved difficult, even with this relatively simple application and little state.
+The test passes, but this is still pretty bad; when the write buffer of a socket is full, trying to write to that socket will block the task, causing it to hold the lock indefinitely. This will prevent any other client from making progress.
+
+You could try to fix this by wrapping every writer with an `Arc<Mutex<OwnedWriteHalf>>`, but this just keeps adding to the complexity and potential pitfalls. This already illustrates how bad it can get with `Mutex`; correctly using them is hard even with this relatively simple application and very little state.
 
 This is especially accentuated by the fact that our state includes an IO resource. But with any complex state, even those that don't include IO resources, as soon as there is more than one `Mutex`, it becomes a minefield of deadlocks. Mutexes can be properly used, but it's hard and probably not the best idea for most IO-bound applications.
 
-Then let's move to a very well known alternative to share state in concurrent applications, channels.
+Having that established, let's move to a very well-known alternative with the purpose of sharing state in concurrent applications: channels.
 
 ### Channels
 
@@ -1062,21 +1082,31 @@ With this in place we will add this function to the server.
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         if let Poll::Ready(Ok((connection, _))) = self.listener.poll_accept(cx) {
             let mut socket = Socket::new(connection);
-            let id = self.connections.len() as u32;
+            let id: u32 = rand::rng().random();
             socket.send(Bytes::from_owner(id.to_be_bytes()));
-            self.connections.push(socket);
+            self.connections.insert(id, socket);
             cx.waker().wake_by_ref();
         }
 
-        for conn in &mut self.connections {
+        for conn in self.connections.values_mut() {
             if conn.poll_send(cx).is_ready() {
                 cx.waker().wake_by_ref();
             }
         }
 
-        for i in 0..self.connections.len() {
-            let Poll::Ready(buf) = self.connections[i].poll_read(cx) else {
-                continue;
+        let keys: Vec<_> = self.connections.keys().copied().collect();
+
+        for k in keys {
+            let buf = match self.connections.get_mut(&k).unwrap().poll_read(cx) {
+                Poll::Ready(Ok(buf)) => buf,
+                Poll::Ready(Err(e)) => {
+                    self.connections.remove(&k);
+                    println!("Failed to read from {k}: {e}");
+                    continue;
+                }
+                Poll::Pending => {
+                    continue;
+                }
             };
 
             cx.waker().wake_by_ref();
@@ -1085,12 +1115,15 @@ With this in place we will add this function to the server.
                 continue;
             };
 
-            self.connections[dest as usize].send(b);
+            let Some(destination) = self.connections.get_mut(&dest) else {
+                continue;
+            };
+
+            destination.send(b);
         }
 
         Poll::Pending
     }
-
 ```
 
 First, we check if listener has a new socket, in case there's we send the id to the socket and push it into our list of sockets. Then for each socket, we advance their internal send queue. Finally, for each socket, we try to read a message, if there's a complete message we enqueue it to the corresponding destination socket.
@@ -1111,31 +1144,29 @@ And there we have it; we're manually polling the futures. If we were handling er
 
 ## Picking a pattern
 
-### Multi task vs Single task
+### Multitask vs Single task
 
 We've worked through these patterns and hopefully demonstrated a bit of their tradeoffs. Now let's expand on that to help you pick which one you should use in your application.
 
-This isn't a pick-one-or-the-other situation. You can "mix and match"; you can lock on a synchronous `Mutex` anywhere and race with an asynchronous one, although it doesn't expose a `poll` API, so you can't trivially use it if you're hand-rolling your own polling logic. You can always use a channel on a task that's polling on multiple futures or as part of a race; this way you can have more than one managing multiple futures with their own internal state and yet have them communicate. 
+This isn't a pick-one-or-the-other situation. You can mix and match; you can lock on a synchronous `Mutex` anywhere and race with an asynchronous one, although it doesn't expose a `poll` API, so you can't trivially use it if you're hand-rolling your own polling logic. You can always use a channel on a task that's polling on multiple futures or as part of a race; this way you can have more than one managing multiple futures with their own internal state and yet have them communicate. 
 
-Yet to pick one, you need to consider the trade-offs of these concurrency patterns.
+Even so, you need to consider the trade-offs of these concurrency patterns to pick which one to use.
 
-There's generally not much of a need to use a `Mutex`, considering how easy it's to mess it up. In practice, the cases where you want a mutex are limited to either very constrained environments on performance or memory, and you can't afford channels for some reason or another; or if you don't have an async runtime and need to share mutable access to some state between threads.
+There's generally not much of a need to use a `Mutex`, considering how easy it is to mess it up. In practice, the cases where you want a mutex are limited to either very constrained environments on performance or memory; or if you don't have an async runtime and need to share mutable access to some state between threads.
 
-Barring those constraints, we can either multiplex all futures in a single task, or use a task per I/O and communicate state updates through channels. For most cases it's better to use a single task, the ergonomics lost from having to explicitly buffer the state of the future is worth having direct mutable access to state instead of managing channels and tasks. After all, functionally the channel is just a buffering layer. 
+Barring those constraints, we can either multiplex all futures in a single task, or use a task per I/O and communicate state updates through channels. For most cases it's better to use a single task, the ergonomics lost from having to explicitly buffer the state of the future are worth having direct mutable access to state instead of managing channels and tasks. After all, functionally, the channel is just a buffering layer. 
 
-The big reason to sacrifice the ergonomics of having a single task with shared access to mutable state, is to have the different futures scheduled in parallel in multiple threads. This is important if the code synchronous code handling events or sequential polling of events is a bottleneck for the throughput of IO events produced. So if more events are produced than a single thread can handle, multiple tasks could be neccesary. This is however, a very complicated case, you lose data locality, the channels blocking and allocations can also negatively impact performance, so if you need to go down this route don't think just spawning new tasks will magically solve your performance issues.
+The big reason for sacrificing the ergonomics of having a single task with shared access to mutable state, is to have the different futures scheduled in parallel in multiple threads. <This is important if the synchronous code handling events or the sequential polling of IO is a bottleneck for the throughput of IO events produced. So if more events are produced than a single thread can handle, multiple tasks could be necessary.> This is however, a very complicated case; you lose data locality and the channels blocking and allocations can also negatively impact performance, so if you need to go down this route don't think just spawning new tasks will magically solve your performance issues.
 
 Of course, if your tasks don't need mutable access to the same state it's a good idea to use them to represent separated units of work and might be more performant. 
 
 ### Hand-rolled future vs Combinators
 
-Finally, it comes down to a choice of either manually polling your futures, or using combinators and adaptors to race all the futures with typical `async`/`await` syntax. I'd tend to go for the first one, on one side there's the benefit that the io polling itself can share mutable state, this is normally not *necessary* but it gives you more versatility on how to structure your IO objects, another key point is that the combinators and adaptors can become very verbose and hard to follow when the codebase grows. Finally, when manually polling you have a plain view into the polling states, what's advancing and what's not, which can be very useful for debugging. Finally, there's the benefit of having the IO errors immediately be surfaced on `poll`.
+In the end, it comes down to a choice of either manually polling your futures, or using combinators and adaptors to race all the futures with typical `async`/`await` syntax. I'd tend to go for the first one, since there's the benefit that the IO polling itself can share mutable state, this is normally not *necessary* but it gives you more versatility on how to structure your IO objects; another key point is that the combinators and adaptors can become very verbose and hard to follow when the codebase grows. Furthermore, when manually polling you have a plain view into the polling states, which can be very useful for debugging. However, this comes at the cost of losing some of the ergonomics of calling `await`, but you can still wrap your function manually polling for IO with `poll_fn` and use it in a greater `async` context. Finally, there's the benefit of having the IO errors immediately be surfaced on `poll`.
 
-You lose some ergonomics of calling `await` yet, you can still wrap your function manually polling for IO with `poll_fn` and use it in a greater `async` context.
+So, in conclusion, if you have multiple futures that require access to shared mutable state, try to keep the polling within a single task, only go to multiple task if the benchmarks hint at improvements. If the number of IO streams is small you can use combinators and wrappers to listen to the events concurrently, but as soon as it gets verbose or hard to debug you should try manually polling those events.
 
-So, in conclusion, if you've multiple futures that require access to shared mutable state, try to keep the polling within a single task, only go to multiple task if benchmarks hint at improvements. If the number of IO streams is small you can use combinators and wrappers to listen to the events concurrently, but as soon as it gets verbose or hard to debug you should try manually polling those events.
-
-#### Sans-IO
+## Sans-IO
 
 Sans-IO is a model for network protocol, where you implement them in an IO-agnostic way, as a state machine that's evolved by outside events.
 

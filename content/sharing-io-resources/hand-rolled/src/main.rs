@@ -1,6 +1,8 @@
 use bytes::Buf;
 use bytes::Bytes;
 use bytes::BytesMut;
+use rand::Rng;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::io;
@@ -17,7 +19,7 @@ async fn main() {
 }
 
 struct Server {
-    connections: Vec<Socket>,
+    connections: HashMap<u32, Socket>,
     listener: TcpListener,
 }
 
@@ -25,7 +27,7 @@ impl Server {
     async fn new() -> Server {
         let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
         Server {
-            connections: vec![],
+            connections: HashMap::new(),
             listener,
         }
     }
@@ -33,21 +35,31 @@ impl Server {
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         if let Poll::Ready(Ok((connection, _))) = self.listener.poll_accept(cx) {
             let mut socket = Socket::new(connection);
-            let id = self.connections.len() as u32;
+            let id: u32 = rand::rng().random();
             socket.send(Bytes::from_owner(id.to_be_bytes()));
-            self.connections.push(socket);
+            self.connections.insert(id, socket);
             cx.waker().wake_by_ref();
         }
 
-        for conn in &mut self.connections {
+        for conn in self.connections.values_mut() {
             if conn.poll_send(cx).is_ready() {
                 cx.waker().wake_by_ref();
             }
         }
 
-        for i in 0..self.connections.len() {
-            let Poll::Ready(Ok(buf)) = self.connections[i].poll_read(cx) else {
-                continue;
+        let keys: Vec<_> = self.connections.keys().copied().collect();
+
+        for k in keys {
+            let buf = match self.connections.get_mut(&k).unwrap().poll_read(cx) {
+                Poll::Ready(Ok(buf)) => buf,
+                Poll::Ready(Err(e)) => {
+                    self.connections.remove(&k);
+                    println!("Failed to read from {k}: {e}");
+                    continue;
+                }
+                Poll::Pending => {
+                    continue;
+                }
             };
 
             cx.waker().wake_by_ref();
@@ -56,7 +68,11 @@ impl Server {
                 continue;
             };
 
-            self.connections[dest as usize].send(b);
+            let Some(destination) = self.connections.get_mut(&dest) else {
+                continue;
+            };
+
+            destination.send(b);
         }
 
         Poll::Pending

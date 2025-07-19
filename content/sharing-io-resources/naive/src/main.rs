@@ -1,5 +1,7 @@
 use bytes::Bytes;
 use bytes::BytesMut;
+use rand::Rng;
+use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 #[tokio::main]
@@ -10,7 +12,7 @@ async fn main() {
 
 struct Server {
     listener: TcpListener,
-    connections: Vec<TcpStream>,
+    connections: HashMap<u32, TcpStream>,
 }
 
 impl Server {
@@ -33,22 +35,41 @@ impl Server {
     }
 
     async fn handle_connection(&mut self, mut socket: TcpStream) {
-        let id = self.connections.len();
-        socket.write_u32(id as u32).await.unwrap();
+        let id = rand::rng().random();
+        socket.write_u32(id).await.unwrap();
         socket.flush().await.unwrap();
-        self.connections.push(socket);
+        self.connections.insert(id, socket);
 
         let mut buffer = BytesMut::new();
 
         loop {
-            let n = self.connections[id].read_buf(&mut buffer).await.unwrap();
-            assert!(n != 0);
+            let Ok(n) = self
+                .connections
+                .get_mut(&id)
+                .unwrap()
+                .read_buf(&mut buffer)
+                .await
+            else {
+                self.connections.remove(&id);
+                break;
+            };
+
+            if n == 0 {
+                self.connections.remove(&id);
+                break;
+            }
 
             let Ok((dest, m)) = parse_message(&mut buffer) else {
                 continue;
             };
 
-            self.connections[dest as usize].write_all(&m).await.unwrap();
+            let Some(socket) = self.connections.get_mut(&dest) else {
+                continue;
+            };
+
+            if let Err(e) = socket.write_all(&m).await {
+                eprintln!("Failed to write to socket {e}");
+            }
         }
     }
 }
