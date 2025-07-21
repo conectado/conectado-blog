@@ -73,7 +73,7 @@ We will assume these unrealistic simplifications.
 
 * Every client is well-behaved and will never abuse the protocol.
   * This means clients will always send complete messages and won't start a new one without finishing the one before.
-  * Every message a client sends follows the protocol, and the message always starts with the 4-byte ID of an existing client.
+  * Every message a client sends follows the protocol, and the message always starts with the 4-byte ID.
 * A client will never send a message to itself.
 * Once started, a server will never stop.
 * Random u32 IDs will never overlap.
@@ -436,16 +436,11 @@ Having that established, let's move to a very well-known alternative with the pu
 
 ### Channels
 
-> [!NOTE]
-> The code for this section can be found in the [channels](./channels) directory.
+To use channels instead of a `Mutex` to synchronize access to state, we use a single task that owns the state, and then other tasks manage the I/O and use channels to send messages to update and retrieve state.
 
-To use channels instead of a `Mutex` to synchronize access to state, we use a single task that owns the state, and the other tasks use channels to send messages to update and retrieve state.
+This pattern comes in many flavors, but I want to focus on how using channels affects sharing mutable state, so I'll just keep it simple. Let's take a look at how this is implemented.
 
-There are many flavors of this pattern; actors[^1] is one of the most popular. Sometimes we use a response channel; sometimes we don't need it. Regardless of the specifics, I want to focus on more general properties of this pattern, so I'll use channels as plainly as possible.
-
-This is a simple reimplementation using channels.
-
-```rs,linenos,hl_lines=46-60
+```rs,linenos,hl_lines=52-75
 struct Server {
     tx: mpsc::Sender<Message>,
     listener: TcpListener,
@@ -529,9 +524,13 @@ enum Message {
 }
 ```
 
-In this version we have a single `message_dispatcher` that owns `connections`. By nature of being the single owner, `message_dispatcher` has `&mut` access to `connections` without any additional synchronization. This is much simpler than using a `Mutex` as there can't be any deadlock[^2]. But there's head-of-the-line blocking.
+{% note() %}
+The code for this example can be found in the {{ github(file="content/sharing-io-resources/channels") }} directory
+{% end %}
 
-In this case, head-of-the-line block means that line 56 prevents messages from any other client from being processed if the socket is not immediately ready. A possible fix is to wrap the sockets in a `Mutex` to be able to move them into a new task for writing, and in that way `message_dispatcher` can continue processing messages, but we're trying to avoid mutexes.
+In this version we have a single `message_dispatcher` that owns `connections`. By nature of being the single owner, `message_dispatcher` has `&mut` access to `connections` without any additional synchronization. This is much simpler than using a `Mutex` as there can't be any deadlock[^1]. But there's head-of-the-line blocking.
+
+In this case, head-of-the-line blocking means that writing to a socket could potentially block the task preventing any other message from being processed until that's done. A possible fix is to wrap the sockets in a `Mutex` to move them into a new task for writing, and in that way `message_dispatcher` can continue processing messages, but we're trying to avoid mutexes.
 
 A better solution is to have a single task owning each writer, in this way:
 
@@ -575,158 +574,264 @@ async fn client_dispatcher(mut connection: OwnedWriteHalf, mut rx: mpsc::Receive
 }
 ```
 
-> [!NOTE]
-> The full code for this version can be found in the [channel-per-writer](./channel-per-writer) directory.
+{% note() %}
+The code for this example can be found in the {{ github(file="content/sharing-io-resources/channel-per-writer") }} directory
+{% end %}
 
-By moving the writer's ownership into the individual `client_dispatcher`, we are able to keep scheduling messages to the socket even when its buffer is full. This is just an additional buffering layer, with the benefit that we're in control of its size, but a single burst of messages to one client could block `central_dispatcher`.
+By moving the socket's ownership into the individual `client_dispatcher`, we are able to keep scheduling messages to the socket even when its buffer is full. But the send channel works just as an additional buffering layer; a single burst of messages to one client could block `central_dispatcher` when that buffer gets full.
 
-We can instead use `try_send`, which isn't blocking, and manage our own buffering logic for all clients. Yet, managing the message buffer can grow into a quite complex problem. To solve this, we can spawn a new task for each message we send to the `client_dispatcher` without using any mutex, since now `writers[i]` is cloneable.
-
+At some point this kind of back pressure is necessary, but what if instead of blocking the whole `central_dispatcher` we wanted to stop reading messages from the particular client? Then you'd need to add a channel like this.
 
 ```rs
-        match msg {
-            Message::New(id, connection) => {
-                let (tx, rx) = mpsc::channel(100);
-
-                let handle = tokio::spawn(client_dispatcher(connection, rx)).abort_handle();
-                let connection = tx.clone();
-                connections.insert(id, (tx, handle));
-                tokio::spawn(async {
-                    connection.send(Bytes::from_owner(id.to_be_bytes())).await.unwrap();
-                });
-            }
-            Message::Send(id, items) => {
+async fn central_dispatcher(mut rx: mpsc::Receiver<Message>) {
+        <...>
+            Message::Send(id, items, permission_token) => {
                 let Some((connection, _)) = connections.get_mut(&id) else {
                     continue;
                 };
 
-                let connection = connection.clone();
                 tokio::spawn(async {
                     if let Err(e) = connection.send(items).await {
                         eprintln!("Failed to write to socket: {e}");
                     }
-                });
+
+                    let _ = permission_token.send(());
+                })
             }
-            Message::Disconnect(id) => {
-                if let Some((_, handle)) = connections.remove(&id) {
-                    handle.abort();
-                }
-            }
+        <...>
         }
+    }
+}
+
 ```
 
-This solves most of the problems; at some point back-pressure needs to be handled, and having the task that sends messages to the `client_dispatcher` be blocked seems good enough. However, one might want to stop reading packets as channels get filled; that way the TCP queues get full and new packets get dropped, and clients will automatically retransmit packets. Notice, however, this would require a channel back from the anonymous tasks that send the bytes to the `client_dispatcher` and then back from the `central_dispatcher` to `handle_connection`.
-
-Another way we will require more channels is if we want to start handling errors on writing to the socket. Instead of being able to handle errors idiomatically in place in `central_dispatcher`, `client_dispatcher` would need a way to send the error back if that error would kill the connection.
-
-Furthermore, each additional IO requires its own task; additionally, each piece of state requires either its own task or to be added to the `central_dispatch`. The first way would also require more channels for cross-communication between state owners.
-
-All these channels and tasks add complexity. For one, tasks need to be managed and dropped eventually[^3]. But there's another complication: we lose co-location of IO and state by creating these channels. Channels do move around, so now when you see the place where state is managed, you have no idea where the events are produced. 
-
-Take a look again at our `central_dispatcher`.
+On the IO side we will simply await the channel.
 
 ```rs
-        match msg {
-            Message::New(id, connection) => {
-                let (tx, rx) = mpsc::channel(100);
-
-                let handle = tokio::spawn(client_dispatcher(connection, rx)).abort_handle();
-                let connection = tx.clone();
-                connections.insert(id, (tx, handle));
-                tokio::spawn(async {
-                    connection.send(Bytes::from_owner(id.to_be_bytes())).await.unwrap();
-                });
-            }
-            Message::Send(id, items) => {
-                let Some((connection, _)) = connections.get_mut(&id) else {
-                    continue;
-                };
-
-                let connection = connection.clone();
-                tokio::spawn(async {
-                    if let Err(e) = connection.send(items).await {
-                        eprintln!("Failed to write to socket: {e}");
-                    }
-                });
-            }
-            Message::Disconnect(id) => {
-                if let Some((_, handle)) = connections.remove(&id) {
-                    handle.abort();
-                }
-            }
-        }
-```
-
-There's no way to know where `rx` comes from other than looking for the place where the channel is created, which can be very far up the stack. Then, to know where `Message` can be produced, you need to look at all the places where the corresponding `tx` moves to, which again can be very far down the stack.
-
-Not having mutexes does simplify things a lot, but there's still complexity related to having multiple tasks. There's, however, a clue on how we could further simplify things. Remember that I said that if we had additional state, we could manage it in the `central_dispatcher` and have it act as a multiplexer between IO events. For example, if we had a new source of events, such as another socket, it can also use `tx` to inform the `central_dispatcher` of the events with a new `Message` variant. If that also required a new state, `central_dispatcher` can also manage that.
-
-Let's say, for example, a new administration socket that can subscribe multiple clients to a "topic" that can look something like this. 
-
-```rs
-    async fn handle_administration_connection(&self, socket: TcpStream) {
-        let (mut read, write) = socket.into_split();
-        self.tx.send(Message::New(write)).await.unwrap();
-
-        let mut buffer = BytesMut::new();
+    async fn handle_connection(&self, socket: TcpStream) {
+        <...>
 
         loop {
-            let n = read.read_buf(&mut buffer).await.unwrap();
-            assert!(n != 0);
-
-            let Ok((topic, clients)) = parse_admin_message(&mut buffer) else {
-                continue;
+            let Ok(n) = read.read_buf(&mut buffer).await else {
+                let _ = self.tx.send(Message::Disconnect(id)).await;
+                break;
             };
 
-            self.tx.send(Message::NewTopic(topic, clients)).await.unwrap();
+            <...>
+
+            let (permission_token, permission_listener) = oneshot::channel();
+            self.tx.send(Message::Send(dest, m, permission_token)).await.unwrap();
+            permission_token.recv().await;
         }
     }
+```
 
-    async fn central_dispatcher(mut rx: mpsc::Receiver<Message>) {
-        let mut writers = Vec::new();
-        let mut topics = HashMap::new();
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                Message::New(connection) => {
-                    let (tx, rx) = mpsc::channel(100);
+But look at how each interaction between state and IO requires a new channel and a new task. In particular, you need to manage the task's lifetime carefully, making sure you don't leak it. [^2]
 
-                    let w = tx.clone();
-                    let id = writers.len();
-                    tokio::spawn(client_dispatcher(connection, rx));
-                    tokio::spawn(async move {
-                        w.send(Bytes::from_owner((id as u32).to_be_bytes()))
-                            .await
-                            .unwrap();
-                    });
-                    writers.push(tx);
+Let's take a look at another example of this. Imagine, we didn't just want to silently fail sending a message when we fail to write it, instead, we wanted to send back a message to the original sender. It'll look a bit like this. 
+
+```rs
+async fn central_dispatcher(reader_rx: mpsc::Receiver<Message>) {
+    let mut connections = HashMap::new();
+    let (write_errors_tx, write_error_rx) = mpsc::channel(100);
+    let write_error_rx = ReceiverStream::new(write_error_rx);
+    let reader_rx = ReceiverStream::new(reader_rx);
+    let mut rx = write_error_rx.merge(reader_rx);
+    while let Some(msg) = rx.next().await {
+        match msg {
+            Message::New(id, connection) => {
+                let (tx, rx) = mpsc::channel(100);
+
+                let errors_tx = write_errors_tx.clone();
+                let handle =
+                    tokio::spawn(client_dispatcher(connection, rx, errors_tx)).abort_handle();
+                if let Err(e) = tx.send((Bytes::from_owner(id.to_be_bytes()), None)).await {
+                    eprintln!("Failed to write to socket: {e}");
                 }
-                Message::Send(id, items) => {
-                    let w = writers[id as usize].clone();
-                    tokio::spawn(async move {
-                        w.send(items).await.unwrap();
-                    });
+                connections.insert(id, (tx, handle));
+            }
+            Message::Send(id, items, src) => {
+                let Some((connection, _)) = connections.get_mut(&id) else {
+                    continue;
+                };
+                if let Err(e) = connection.send((items, Some(src))).await {
+                    eprintln!("Failed to write to socket: {e}");
                 }
-                Message::NewTopic(topic, clients) => {
-                    topics.insert(topic, clients.iter().map(|c| writers[c].clone()).collect_vec());
+            }
+            Message::Disconnect(id) => {
+                if let Some((_, handle)) = connections.remove(&id) {
+                    handle.abort();
                 }
-                Message::SendTopic(topic, message) => {
-                    for w in topics.get(topic).unwrap() {
-                        let w = w.clone();
-                        tokio::spawn(async move {
-                            w.send(items).await.unwrap();
-                        });
-                    }
-                }
+            }
+            Message::Error(e, src) => {
+                eprintln!("Failed to write to socket: {e}");
+                let Some(src) = src else {
+                    continue;
+                };
+
+                let Some((connection, _)) = connections.get(&src) else {
+                    continue;
+                };
+
+                let mut error = BytesMut::new();
+                error.put_u8(0xFF);
+                error.put(&format!("Error: {}\0", e).into_bytes()[..]);
+
+                let _ = connection.send((error.freeze(), None)).await;
             }
         }
     }
+}
+
+async fn client_dispatcher(
+    mut connection: OwnedWriteHalf,
+    mut rx: mpsc::Receiver<(Bytes, Option<u32>)>,
+    errors_tx: mpsc::Sender<Message>,
+) {
+    loop {
+        let (m, src) = rx.recv().await.unwrap();
+        if let Err(e) = connection.write_all(&m).await {
+            let _ = errors_tx.send(Message::Error(e, src)).await;
+            break;
+        }
+    }
+}
+
+```
+
+{% note() %}
+The code for this example can be found in the {{ github(file="content/sharing-io-resources/channel-with-error") }} directory
+{% end %}
+
+We were able to reuse the same channel this time, but there's a separation between the callsite of the IO function and the handler of the error. This interrupts the normal error flow, where `client_dispatcher` can't use a `?` or handle the error by altering the state. The awkwardness with this is made evident by that `src` we needed to pass around between `central_dispatcher` and `client_dispatcher` back and forth to keep context on the error. The same happens with the `disconnect` message; instead of just handling the `read` error, we're creating a different message so that the `central_dispatcher` can update the state. 
+
+This is a consequence of the biggest downside of using this model to mutate state: by completely decoupling the IO from the state, there is no way to know from where the values that alter the state are emitted within the context of that state. To see what I mean take a look at the latest implementation of `central_dispatcher`.
+
+```rs,linenos,hl_lines=20-27
+async fn central_dispatcher(reader_rx: mpsc::Receiver<Message>) {
+    let mut connections = HashMap::new();
+    let (write_errors_tx, write_error_rx) = mpsc::channel(100);
+    let write_error_rx = ReceiverStream::new(write_error_rx);
+    let reader_rx = ReceiverStream::new(reader_rx);
+    let mut rx = write_error_rx.merge(reader_rx);
+    while let Some(msg) = rx.next().await {
+        match msg {
+            Message::New(id, connection) => {
+                let (tx, rx) = mpsc::channel(100);
+
+                let errors_tx = write_errors_tx.clone();
+                let handle =
+                    tokio::spawn(client_dispatcher(connection, rx, errors_tx)).abort_handle();
+                if let Err(e) = tx.send((Bytes::from_owner(id.to_be_bytes()), None)).await {
+                    eprintln!("Failed to write to socket: {e}");
+                }
+                connections.insert(id, (tx, handle));
+            }
+            Message::Send(id, items, src) => {
+                let Some((connection, _)) = connections.get_mut(&id) else {
+                    continue;
+                };
+                if let Err(e) = connection.send((items, Some(src))).await {
+                    eprintln!("Failed to write to socket: {e}");
+                }
+            }
+            Message::Disconnect(id) => {
+                if let Some((_, handle)) = connections.remove(&id) {
+                    handle.abort();
+                }
+            }
+            Message::Error(e, src) => {
+                eprintln!("Failed to write to socket: {e}");
+                let Some(src) = src else {
+                    continue;
+                };
+
+                let Some((connection, _)) = connections.get(&src) else {
+                    continue;
+                };
+
+                let mut error = BytesMut::new();
+                error.put_u8(0xFF);
+                error.put(&format!("Error: {}\0", e).into_bytes()[..]);
+
+                let _ = connection.send((error.freeze(), None)).await;
+            }
+        }
+    }
+}
+```
+
+Imagine you wanted to know where the `Message::Send(...)` comes from and what the parameters are. One way you could try to do this in normal sync code is to set a breakpoint at that line, look at the backtrace, and try to work backwards to where the variables come from. But, in this case, if you print the backtrace at that point, you get the following.
+
+
+```
+frame #0: 0x0000000100032164 channel-per-writer`channel_per_writer::central_dispatcher at main.rs:115:45
+frame #1: channel-per-writer`tokio::runtime::task::core::Core::poll at core.rs:331:17``
+...
 
 ```
 
 
-{{ note(body="This code is merely illustrative, it's not written to be compiled.") }}
+This means, it's reasonable to expect the value of the variable to come from some local function call, as there's nothing up stack we can look at in our own code. Let's trace back where `Message::Send(...)` comes from then, first we can see there's a match with `msg`, so we need to find `msg`, which is defined a few lines above from `let Some(msg) = rx.next().await`. From just the line above`rx` is a combination of `write_error_rx` and `reader_rx`, `write_reader_rx` is a channel we created locally, so its corresponding `Sender` we can trace down but `reader_rx` comes from the caller of `central_dispatcher` which we can't find in the backtrace!
 
- Well, we still have multiple incoming and outgoing channels, but this shows that we can have a single task managing state while listening concurrently to multiple IO events. So perhaps, we can move the IO inside that same task and simplify things further. 
+This is potentially a problem with any callback, but it's worse with channels. Even if you manage to track down where the channel is created, it doesn't tell you what is the source of the received values is; for that you need to find the corresponding `Sender`. But the `Sender` is cloneable, so you could find it in multiple places. And more than one of those places could potentially send the same variant, making it impossible to correlate the function that sent the values with the value received in a normal debugger. This can make programs very difficult both to understand and to debug.
+
+Contrast this with the `Mutex` version of `handle_connection`:
+
+
+```rs,linenos,hl_lines=34,10-17
+async fn handle_connection(&self, mut socket: TcpStream) {
+    let id: u32 = rand::rng().random();
+    socket.write_u32(id).await.unwrap();
+    socket.flush().await.unwrap();
+    self.connections.lock().await.insert(id, socket);
+
+    let mut buffer = BytesMut::new();
+
+    loop {
+        let Ok(n) = self
+            .connections
+            .lock()
+            .await
+            .get_mut(&id)
+            .unwrap()
+            .read_buf(&mut buffer)
+            .await
+        else {
+            self.connections.lock().await.remove(&id);
+            break;
+        };
+
+        if n == 0 {
+            self.connections.lock().await.remove(&id);
+            break;
+        }
+
+        let Ok((dest, m)) = parse_message(&mut buffer) else {
+            continue;
+        };
+
+        let mut connections = self.connections.lock().await;
+
+        let Some(socket) = connections.get_mut(&dest) else {
+            continue;
+        };
+
+        if let Err(e) = socket.write_all(&m).await {
+            eprintln!("Failed to write to socket {e}");
+        }
+    }
+}
+```
+
+
+In this case, if you wanted to know where the value of `m`, `dest`, or `id` came from, you can just look them up locally, since the IO is done in the same backtrace as where they are used. For example, `m` comes from a pattern match in `parse_message` by passing `buffer` into the function, `buffer` comes from `read_buf` just a few lines above, and we can see that we created the buffer locally. So we know the buffer comes from reading on a socket on `connections`, which we can find if we look at `&self`.
+
+
+<!-- Diagram of strict hierarchical calls and sharing memory through channels -->
+
+The question then is, can we still have locality of the IO data without having to use a `Mutex` to share mutable access to state? And in fact we can if we use a single task to do everything.
+
 
 ### A single task to rule them all
 
@@ -1184,9 +1289,8 @@ To learn more about Sans-IO you could read...
 
 ---
 
-[^1]: https://draft.ryhl.io/blog/actors-with-tokio/
-[^2]: In fairness, deadlocks are still possible, if 2 tasks are waiting from one another preventing from making any other work.
-[^3]: https://draft.ryhl.io/blog/actors-with-tokio/ has a very good explanation on how this can be done!
+[^1]: In fairness, deadlocks are still possible, if 2 tasks are waiting from one another preventing from making any other work.
+[^2]: https://draft.ryhl.io/blog/actors-with-tokio/ Has a discussion of how to do this.
 [^4]: https://github.com/yoshuawuyts/futures-concurrency/issues/85
 [^5]: https://github.com/yoshuawuyts/futures-concurrency/pull/104
 [^6]: Of course there should be extra care to no longer use the index into the connections like we were before, a Map ofIDs to sockets would work much better.
