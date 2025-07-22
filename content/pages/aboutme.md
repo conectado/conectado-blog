@@ -9,7 +9,7 @@ comments = false
 
 Hello! I'm Gabriel Steinberg, I also go by @conectado, but you can call me Gabi if you want.
 
-I'm a Rust Engineer... Programmer? A guy who yells at the compiler until it does it job.
+I'm a Rust Engineer... Programmer? A guy who yells at the compiler until it does its job.
 
 My topics of interest are Networking and Security but I also loooove math and physics.
 
