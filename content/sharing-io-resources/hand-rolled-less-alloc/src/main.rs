@@ -1,6 +1,8 @@
 use bytes::Buf;
+use bytes::BufMut;
 use bytes::Bytes;
 use bytes::BytesMut;
+use bytes::buf::Limit;
 use rand::Rng;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -84,8 +86,8 @@ impl Server {
 }
 
 struct Socket {
-    write_buffers: VecDeque<Bytes>,
     read_buffer: BytesMut,
+    next_packet: Option<Bytes>,
     stream: TcpStream,
     waker: Option<Waker>,
 }
@@ -93,8 +95,8 @@ struct Socket {
 impl Socket {
     fn new(stream: TcpStream) -> Socket {
         Socket {
-            write_buffers: VecDeque::new(),
-            read_buffer: BytesMut::new(),
+            next_packet: None,
+            read_buffer: BytesMut::with_capacity(u16::MAX.into()),
             waker: None,
             stream,
         }

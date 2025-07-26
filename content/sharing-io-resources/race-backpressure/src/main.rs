@@ -23,7 +23,7 @@ struct Server {
 
 #[derive(Debug)]
 enum Event {
-    Read((u32, Bytes)),
+    Read(u32, Bytes, u32),
     Connection(TcpStream),
 }
 
@@ -79,17 +79,17 @@ impl Server {
             };
 
             match ev {
-                Event::Read((dest, items)) => {
+                Event::Read(dest, items, sender) => {
                     let Some(writer) = self.write_connections.get_mut(&dest) else {
                         continue;
                     };
-                    writer.send(items);
+                    writer.send(items, sender);
                 }
                 Event::Connection(tcp_stream) => {
                     let id = rand::rng().random();
                     let (r, w) = tcp_stream.into_split();
                     let mut write_sock = WriteSocket::new(w, id);
-                    write_sock.send(Bytes::from_owner(id.to_be_bytes()));
+                    write_sock.send(Bytes::from_owner(id.to_be_bytes()), id);
                     self.read_connections.insert(id, ReadSocket::new(r, id));
                     self.write_connections.insert(id, write_sock);
                 }
@@ -117,8 +117,8 @@ impl ReadSocket {
 
     async fn read(&mut self) -> Result<Event> {
         loop {
-            if let Ok(read_result) = parse_message(&mut self.buffer) {
-                return Ok(Event::Read(read_result));
+            if let Ok((dest, items)) = parse_message(&mut self.buffer) {
+                return Ok(Event::Read(dest, items, self.id));
             };
 
             self.reader
@@ -130,7 +130,7 @@ impl ReadSocket {
 }
 
 struct WriteSocket {
-    buffers: VecDeque<Bytes>,
+    buffers: VecDeque<(Bytes, u32)>,
     writer: OwnedWriteHalf,
     id: u32,
 }
@@ -146,7 +146,7 @@ impl WriteSocket {
 
     async fn advance_send(&mut self) -> Result<Event> {
         loop {
-            let Some(buffer) = self.buffers.front_mut() else {
+            let Some((buffer, _)) = self.buffers.front_mut() else {
                 std::future::pending::<Infallible>().await;
                 unreachable!();
             };
@@ -160,8 +160,8 @@ impl WriteSocket {
         }
     }
 
-    fn send(&mut self, buf: Bytes) {
-        self.buffers.push_back(buf);
+    fn send(&mut self, buf: Bytes, sender: u32) {
+        self.buffers.push_back((buf, sender));
     }
 }
 

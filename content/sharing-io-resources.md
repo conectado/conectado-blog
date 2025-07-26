@@ -608,22 +608,22 @@ async fn central_dispatcher(mut rx: mpsc::Receiver<Message>) {
 On the IO side we will simply await the channel.
 
 ```rs
-    async fn handle_connection(&self, socket: TcpStream) {
+async fn handle_connection(&self, socket: TcpStream) {
+    <...>
+
+    loop {
+        let Ok(n) = read.read_buf(&mut buffer).await else {
+            let _ = self.tx.send(Message::Disconnect(id)).await;
+            break;
+        };
+
         <...>
 
-        loop {
-            let Ok(n) = read.read_buf(&mut buffer).await else {
-                let _ = self.tx.send(Message::Disconnect(id)).await;
-                break;
-            };
-
-            <...>
-
-            let (permission_token, permission_listener) = oneshot::channel();
-            self.tx.send(Message::Send(dest, m, permission_token)).await.unwrap();
-            permission_token.recv().await;
-        }
+        let (permission_token, permission_listener) = oneshot::channel();
+        self.tx.send(Message::Send(dest, m, permission_token)).await.unwrap();
+        permission_token.recv().await;
     }
+}
 ```
 
 But look at how each interaction between state and IO requires a new channel and a new task. In particular, you need to manage the task's lifetime carefully, making sure you don't leak it. [^2]
@@ -837,7 +837,9 @@ The question then is, can we still have locality of the IO data without having t
 
 #### Racing futures
 
-Handling multiple concurrent events in a single task in async Rust is actually a pretty common pattern; a typical reason to do this is to wait for both a timeout and a channel or to handle cancellation while blocking on some IO. This is often done through the [`tokio::select!`](https://docs.rs/tokio/latest/tokio/macro.select.html) macro. However, `tokio::select!` isn't ideal for our case; we have a variable number of futures we want to listen to, so we can use something like [`futures::future::select_all`](https://docs.rs/futures/latest/futures/future/fn.select_all.html) or [`futures_concurrency::future::Race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html).
+The key insight here is that we just need concurrency, we don't need parallelism. We can exploit this and handle all IO in the same task, this allows that task to have ownership of the state and be able to freely mutate it.
+
+Handling multiple concurrent events in a single task in async Rust is actually a pretty common pattern; a typical reason to do this is to wait for both a timeout and a channel, or to handle cancellation while blocking on some IO. This is often done through the [`tokio::select!`](https://docs.rs/tokio/latest/tokio/macro.select.html) macro. However, `tokio::select!` isn't ideal for our case; we have a variable number of futures we want to listen to, so we can use something like [`futures::future::select_all`](https://docs.rs/futures/latest/futures/future/fn.select_all.html) or [`futures_concurrency::future::Race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html).
 
 
  As explained [in Tokio's docs,](https://docs.rs/tokio/latest/tokio/macro.select.html#merging-streams) this can also be achieved using streams; that way we never drop an incomplete future. By doing it that way, we don't have to worry about cancellation safety. Nevertheless, all futures we're using are cancel-safe, so we will go with `futures_concurrency::future::Race`, as that makes adaptors as simple as possible.
@@ -847,22 +849,23 @@ With this in mind, our goal is to wait concurrently on any of our possible IO ev
 * A new message from a socket.
 And react as they happen synchronously. Concurrently to waiting on those events, we want to forward bytes to the clients.
 
-The first thing we require to make this work is to homogenize the return types from our futures, this will simply be done by an `Event` enum.
+The first thing we require to make this work is to homogenize the return types from our futures, this will simply be done by a `Event` enum.
 
 ```rs
-enum Event<'a> {
-    Read(&'a mut BytesMut),
+enum Event {
+    Read((u32, Bytes)),
     Connection(TcpStream),
 }
 ```
+This is exactly the same as the message.
 
-This is similar to the `Message` enum we had before, but the `Read` variant doesn't contain the parsed message; instead, it has the raw bytes from the socket. The parsing will be done after the event is generated.
+We also define this result, that encapsulates the `io::Error` but adds the context of the client ID of the socket that generated the error.
 
 ```rs
 type Result<T> = std::result::Result<T, (io::Error, u32)>;
 ```
 
-Now, this socket abstraction makes it all come together. Let's take a look at it.
+The following socket abstraction makes it all come together. Let's take a look at it.
 
 ```rs
 struct ReadSocket {
@@ -881,136 +884,19 @@ impl ReadSocket {
     }
 
     async fn read(&mut self) -> Result<Event> {
-        self.reader
-            .read_buf(&mut self.buffer)
-            .await
-            .map_err(|e| (e, self.id))?;
-        Ok(Event::Read(&mut self.buffer))
-    }
-}
-
-struct WriteSocket {
-    buffer: BytesMut,
-    writer: OwnedWriteHalf,
-    id: u32,
-}
-
-impl WriteSocket {
-    fn new(writer: OwnedWriteHalf, id: u32) -> WriteSocket {
-        WriteSocket {
-            buffer: BytesMut::new(),
-            writer,
-            id,
-        }
-    }
-
-    async fn advance_send(&mut self) -> Result<Event> {
         loop {
-            if !self.buffer.has_remaining() {
-                std::future::pending::<Event>().await;
-            }
+            if let Ok(read_result) = parse_message(&mut self.buffer) {
+                return Ok(Event::Read(read_result));
+            };
 
-            self.writer
-                .write_all_buf(&mut self.buffer)
+            self.reader
+                .read_buf(&mut self.buffer)
                 .await
                 .map_err(|e| (e, self.id))?;
         }
     }
-
-    fn send(&mut self, buf: &[u8]) {
-        self.buffer.put_slice(buf);
-    }
 }
-```
 
-There's nothing outlandish with the `ReadSocket`; it owns its read buffer so as to make the `read` function only take `&mut self`. This way sockets don't need to share buffers and allows multiple `read` calls to run concurrently.
-
-`WriteSocket` in contrast is pretty interesting. We don't really need to handle any event from sending bytes down to the clients, but we do need to drive that future forward. In order to do this, `send` doesn't block, instead it schedules the bytes to be sent at a later point. This way, as soon as we read some new bytes we can `send` them without blocking the task. In order to drive the socket forward we'll use the future created by `advance_send`.
-
-In its signature `advance_send` returns an `Event`; however, the only purpose of the return type is to be able to use it with `Race` at a later time; the function itself never returns. Instead, it loops indefinitely; if its buffer is empty, it will await on `pending`. This leaves the future in a `Pending` state without any wake condition, meaning `advance_send` will never do any more work. If the buffer has anything left on it, the function will try to write all its contents into the socket and loop around into the pending state once it's done. If at any point while writing its contents the `advance_send` future is dropped, `write_all_buf` only advances `BytesMut` the number of bytes that has been written. Meaning, next time we call `advance_send` on the same `WriteSocket`, it'll continue sending bytes from the last byte we left off.
-
-Now, if we were to simply `await` on `advance_send`, that would block a task forever, but if we do it concurrently with other futures we `select` we can react to the other futures and continue driving the `WriteSocket` forward.
-
-With these new structs in place, we need need to know how we "wait for the next event".
-
-```rs
-    fn next_event(&mut self) -> impl Future<Output = Result<Event>> {
-        let listen = self
-            .listener
-            .accept()
-            .map(|stream| Ok(Event::Connection(stream.unwrap().0)));
-
-        // Neither `Race` nor `select_all` works with empty vectors
-        if self.read_connections.is_empty() {
-            return listen.boxed();
-        }
-
-        let reads = self
-            .read_connections
-            .values_mut()
-            .map(|reader| reader.read())
-            .collect::<Vec<_>>()
-            .race();
-
-        let writes = self
-            .write_connections
-            .values_mut()
-            .map(|write| write.advance_send())
-            .collect::<Vec<_>>()
-            .race();
-
-        (listen, reads, writes).race().boxed()
-    }
-
-```
-
-When there are no connections yet, the only possible event is a new connection emitted by the `listener`. Otherwise, we `race` among all the futures from all writers, readers, and the listener, and emit an event based on the first one to finish. [`race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html#tymethod.race) is a method provided by the `Race` trait. `race` is also fair[^4][^5], in the sense that none of the futures will hog the executor.
-
-With this `next_event` in place, we can now handle all events concurrently in a single task, using this `handle_connections` function.
-
-
-```rs
-    pub async fn handle_connections(&mut self) {
-        loop {
-            let ev = self.next_event().await;
-            let ev = match ev {
-                Ok(ev) => ev,
-                Err((e, i)) => {
-                    eprintln!("Socket error: {e}");
-                    self.read_connections.remove(&i);
-                    self.write_connections.remove(&i);
-                    continue;
-                }
-            };
-
-            match ev {
-                Event::Read(bytes_mut) => {
-                    let Ok((i, d)) = parse_message(bytes_mut) else {
-                        continue;
-                    };
-                    let Some(writer) = self.write_connections.get_mut(&i) else {
-                        continue;
-                    };
-                    writer.send(&d);
-                }
-                Event::Connection(tcp_stream) => {
-                    let id = rand::rng().random();
-                    let (r, w) = tcp_stream.into_split();
-                    let mut write_sock = WriteSocket::new(w, id);
-                    write_sock.send(&id.to_be_bytes());
-                    self.read_connections.insert(id, ReadSocket::new(r, id));
-                    self.write_connections.insert(id, write_sock);
-                }
-            }
-        }
-    }
-```
-
-Notice how now we have `&mut self` access to the state; we can simply modify `read_connections` and `write_connections` as our IO generates events. And we have the benefit of concurrency provided by the runtime to execute all this IO concurrently. I think this is pretty neat.
-
-Yet, we can go further down this path. First, let's get something out of the way: we can make this approach zero-copy with a few modifications. We change `WriteSocket` to this.
-
-```rs
 struct WriteSocket {
     buffers: VecDeque<Bytes>,
     writer: OwnedWriteHalf,
@@ -1048,48 +934,184 @@ impl WriteSocket {
 }
 ```
 
-Now, `send` no longer copies data; instead, it keeps it in an internal vector. Then with a slight modification to `handle_connection` we can make this all work.
+There's nothing outlandish with the `ReadSocket` implementation; it owns its read buffer to make the `read` function only take `&mut self`. This way sockets don't need to share buffers and allows multiple `read` calls to run concurrently.
+
+`WriteSocket` in contrast is pretty interesting. We don't really need to handle any event from sending bytes down to the clients, but we do need to drive that future forward. In order to do this, `send` doesn't block, instead it schedules the bytes to be sent at a later point. This way, as soon as we read some new bytes we can `send` them without blocking the task. In order to drive the socket forward we'll use the future created by `advance_send`.
+
+In its signature `advance_send` returns a `Event`; however, the only purpose of the return type is to be able to use it with `Race` at a later time; the function itself never returns. Instead, it loops indefinitely; if its buffers are empty, it will await on `pending`. Leaving the future in a `Pending` state without any wake condition, meaning `advance_send` will never do any more work. On the other hand, if there's any buffer to still work on the function will try to write all its contents into the socket and loop around into the pending state once it's done.
+
+If the future created by `advance_send` is dropped before writing all the contents of the buffers, next call to `advance_send` will resume working where the previous one left off, as `write_all_buf` only advances `Bytes` the number of bytes that has been written.
+
+{{ note(body="A better implementation could advance on all buffers concurrently, but I opted for simplicity.") }}
+
+Now, if we were to simply `await` on `advance_send`, that would block a task forever. But if we do it concurrently with other futures, we can react to the other futures and continue driving the `WriteSocket` forward.
+
+
+With these new structs in place, we will define a function that gives us the "next event" that we need to react to.
 
 ```rs
-    pub async fn handle_connections(&mut self) {
-        loop {
-            let ev = self.next_event().await;
-            let ev = match ev {
-                Ok(ev) => ev,
-                Err((e, i)) => {
-                    eprintln!("Socket error: {e}");
-                    self.read_connections.remove(&i);
-                    self.write_connections.remove(&i);
-                    continue;
-                }
-            };
+fn next_event(&mut self) -> impl Future<Output = Result<Event>> {
+    let listen = self
+        .listener
+        .accept()
+        .map(|stream| Ok(Event::Connection(stream.unwrap().0)));
 
-            match ev {
-                Event::Read(bytes_mut) => {
-                    let Ok((i, d)) = parse_message(bytes_mut) else {
-                        continue;
-                    };
-                    let Some(writer) = self.write_connections.get_mut(&i) else {
-                        continue;
-                    };
-                    writer.send(d);
-                }
-                Event::Connection(tcp_stream) => {
-                    let id = rand::rng().random();
-                    let (r, w) = tcp_stream.into_split();
-                    let mut write_sock = WriteSocket::new(w, id);
-                    write_sock.send(Bytes::from_owner(id.to_be_bytes()));
-                    self.read_connections.insert(id, ReadSocket::new(r, id));
-                    self.write_connections.insert(id, write_sock);
-                }
+    // Neither `Race` nor `select_all` works with empty vectors
+    if self.read_connections.is_empty() {
+        return listen.boxed();
+    }
+
+    let reads = self
+        .read_connections
+        .values_mut()
+        .map(|reader| reader.read())
+        .collect::<Vec<_>>()
+        .race();
+
+    let writes = self
+        .write_connections
+        .values_mut()
+        .map(|write| write.advance_send())
+        .collect::<Vec<_>>()
+        .race();
+
+    (listen, reads, writes).race().boxed()
+}
+
+```
+
+When there are no connections yet, the only possible event is a new connection emitted by the `listener`. Otherwise, we `race` among all the futures from all writers, readers, and the listener that will emit an event from the first one to finish. The [`race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html#tymethod.race) method is provided by the `Race` trait; it returns the result of the first to finish among the raced futures. `race` is fair[^4][^5], which means that if one future is producing a lot of events, like a socket that keeps receiving packets, it will not always win the race if there's another future that has also finished.
+
+With this `next_event` in place, we can now handle all events concurrently in a single task, using this `handle_connections` function.
+
+
+```rs
+pub async fn handle_connections(&mut self) {
+    loop {
+        let ev = self.next_event().await;
+        let ev = match ev {
+            Ok(ev) => ev,
+            Err((e, i)) => {
+                eprintln!("Socket error: {e}");
+                self.read_connections.remove(&i);
+                self.write_connections.remove(&i);
+                continue;
+            }
+        };
+
+        match ev {
+            Event::Read((dest, items)) => {
+                let Some(writer) = self.write_connections.get_mut(&dest) else {
+                    continue;
+                };
+                writer.send(items);
+            }
+            Event::Connection(tcp_stream) => {
+                let id = rand::rng().random();
+                let (r, w) = tcp_stream.into_split();
+
+                let mut write_sock = WriteSocket::new(w, id);
+
+                write_sock.send(Bytes::from_owner(id.to_be_bytes()));
+
+                self.read_connections.insert(id, ReadSocket::new(r, id));
+                self.write_connections.insert(id, write_sock);
             }
         }
     }
+}
 ```
 
-This is all well and good, but there are still some other trade-offs we can make. First, note that we need to make an adaptor for every future to return a `Event`; this can get awkward when you've multiple futures from multiple sources. Furthermore, errors need to be wrapped with an event to be able to correlate it back to one of the futures with some indication of the causing future. `select_all` does give us exactly what the future that finished was, but it required some additional handling. Finally, there are some rare cases when you need to share state while the futures are advancing; for example, if for some reason you didn't have access to something like the bytes crate and didn't want to clone, you'd need to share access to the same buffer while writing and reading. This is simply impossible like this without a Mutex.
+{% note() %}
+The code for this example can be found in the {{ github(file="content/sharing-io-resources/race-zero-copy") }} directory
+{% end %}
 
-So let's explore an option that lifts these limitations.
+Now we have `&mut self` access to the state; we can simply modify `read_connections` and `write_connections` as our IO generates events. And we have the benefit of concurrency provided by the runtime to execute all this IO concurrently. I think this is pretty neat.
+
+Also, in this implementation for the socket's IO, we've been able to leverage the `?` operator. This led to much more idiomatic code. With this, if we wanted to send an error back to a sender, we don't need to create or manage a new channel; we can just do it in place with a few modifications. If we changed `WriteSocket` to:
+
+```rs
+struct WriteSocket {
+    buffers: VecDeque<(Bytes, u32)>,
+    writer: OwnedWriteHalf,
+    id: u32,
+}
+```
+
+Each buffer maintains the original sender, allowing us to handle errors for a socket in this way:
+
+
+```rs
+Err((e, i)) => {
+    eprintln!("Socket error: {e}");
+
+    self.read_connections.remove(&i);
+    let removed_socket = self.write_connections.remove(&i);
+    for ((_, sender)) in removed_socket.buffers {
+        let Some(sender) = self.write_connections.get(&sender) else { continue; };
+
+        let mut error = BytesMut::new();
+        error.put_u8(0xFF);
+        error.put(&format!("Error: {e}\0").into_bytes()[..]);
+
+        sender.send(error);
+    }
+
+    continue;
+}
+```
+
+Way simpler than having the error go through 2 channels. Applying back-pressure does require `advance_send` to emit an event after sending, like this;
+
+```rs
+    async fn advance_send(&mut self) -> Result<Event> {
+        let Some((buffer, _)) = self.buffers.front_mut() else {
+            std::future::pending::<Infallible>().await;
+            unreachable!();
+        };
+
+        self.writer
+            .write_all_buf(buffer)
+            .await
+            .map_err(|e| (e, self.id))?;
+
+        self.buffers.pop_front();
+
+        Ok(Event::Sent)
+    }
+```
+
+Then you can modify `next_event` like this:
+
+```rs
+    fn next_event(&mut self) -> impl Future<Output = Result<Event>> {
+        <...>
+
+        if self.buffer_size() > MAX_BUFFER {
+            (listen, writes).race().boxed()
+        } else {
+            (listen, reads, writes).race().boxed()
+        }
+    }
+
+```
+
+Where `self.buffer_size()` can be a function that either keeps internal track of the occupied buffers or simply sums over all the buffers of all the sockets. With this we've achieved back-pressure over all sockets instead of just one that takes into account all outstanding packets.
+
+Still, this approach is not without its limitations.
+
+First, the IO itself can't share mutable state. Most of the cases where you want to share mutable state between IO can be worked around using the `bytes` crate. But sharing mutable state among IO can make it easier to reduce the number of mallocs, or copying, or when you're in constrained environments such as no-std or no alloc. But I won't focus on this since they are very specific optimizations that don't apply in most cases.
+
+<!-- TODO: still I might add an example limiting the size of the read/write buffers and preventing that from head-of-the-line blocking -->
+
+
+Second, you need to keep context within errors; look at those awkward `.map_err(|e| (e, self.id))?;`. This is because we're scheduling multiple functions to be polled by the executor; when we do this, we need some way to keep track of which future was the one that produced the result. 
+
+{{ note(body="`select_all` does return the index of the future that returned the result. But mapping that to the socket requires additional upkeep, as you need to know exactly what were the futures scheduled and do some *math* to track that back to an specific map. Also, if you go down that route make sure to use all collections that preserve order when iterated, i.e., `BTreeMap`", header="Using `select_all` index to track the errored socket", hidden = true) }}
+
+Third, as you add more futures and events to your application, `next_event` can become quite complicated. This can potentially have a performance impact, since there are a few allocations associated with this function, although this can be avoided with `select_all`, which can work directly over iterators. Still, this can be very unergonomic. Furthermore, you need to homogenize all return values from IO into a single `Event` enum. In this case it was easy since we're making our own wrappers around sockets, but when using futures provided by other libraries, you will need to create some adaptor to wrap the return type into `Event`. 
+
+But there's an approach that can lift these limitations.
 
 #### Hand-rolled future
 
