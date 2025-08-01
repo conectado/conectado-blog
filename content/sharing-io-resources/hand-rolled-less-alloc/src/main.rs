@@ -1,8 +1,6 @@
 use bytes::Buf;
-use bytes::BufMut;
 use bytes::Bytes;
 use bytes::BytesMut;
-use bytes::buf::Limit;
 use rand::Rng;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -95,7 +93,7 @@ struct Socket {
 impl Socket {
     fn new(stream: TcpStream) -> Socket {
         Socket {
-            next_packet: None,
+            write_buffers: VecDeque::new(),
             read_buffer: BytesMut::with_capacity(u16::MAX.into()),
             waker: None,
             stream,
@@ -144,9 +142,6 @@ impl Socket {
         loop {
             ready!(self.stream.poll_read_ready(cx))?;
             match self.stream.try_read_buf(&mut self.read_buffer) {
-                Ok(0) => {
-                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset)));
-                }
                 Ok(_) => {}
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
                     continue;

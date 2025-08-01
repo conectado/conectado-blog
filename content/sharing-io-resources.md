@@ -1,6 +1,6 @@
 +++
-title = "Sharing state in async code by using the reactor pattern"
-description = "Comparison of patterns for sharing mutable state in concurrent applications, and a case for the reactor pattern"
+title = "Wait! Don't spawn that task!"
+description = "Comparison of patterns for sharing mutable state in concurrent applications, and a case for using a single task"
 date = 2025-07-04
 draft = false
 
@@ -13,9 +13,9 @@ toc = true
 +++
 
 
-Correctly sharing mutable state in concurrent Rust code is difficult. To achieve this, we normally use either mutexes or channels. I want to propose an alternative, the **reactor pattern**.
+Sharing mutable state in concurrent code is difficult, whether in Rust or any other language. To achieve this, normally multiple tasks are used, the Runtime multiplex them among available threads, and state is shared among them using either channels or Mutexes. I want to propose an alternative, multiplexing all futures in a single task, and thus discarding the need for any kind of synchronization primitive. 
 
-In this article I'll present a simple example of a network application, and progressively apply these patterns, in order to consider their trade-offs, showing you how the reactor pattern allows you to share mutable state in a straightforward manner.
+In this article I'll present a simple example of a network application, progressively applying the different concurrency patterns, mutexes, channels, and two approaches on a single task to consider their trade-offs. Arguing that in a lot of cases approaching concurrency with a single task can simplify async applications.
 
 <!-- more -->
 
@@ -23,13 +23,13 @@ In this article I'll present a simple example of a network application, and prog
 
 This post is specifically about sharing mutable state in IO-bound applications. These kinds of applications benefit heavily from concurrency, meaning that tasks don't block the execution of the rest of the program while waiting for IO events to occur. To deal with this, we normally use async runtimes, and that's what I'll focus on.
 
-The most common way to achieve concurrency in an async runtime is to spawn new `Task`s to handle IO events. `Task` is a primitive provided by the async runtime that represents a unit of work. As IO events unblock this unit of work, it can then be scheduled on this thread or another to run concurrently with other `Task`s.
+The most common way to achieve concurrency in an async runtime is to spawn new `Task`s to handle IO events. `Task` is a primitive provided by async runtimes that represents a unit of work. As IO events unblock this unit of work, it can then be scheduled on the same thread or another to run concurrently with other `Task`s.
 
-There's a price to pay for that convenience; any `Future` that `Task` is meant to execute must be `'static` and possibly `'Send`. For the latter, it's only a requirement if it can be scheduled in different threads. This can be prevented by using constructs like `tokio::task::LocalSet`, although it can be a bit unwieldy, it will get rid of the `'Send` requirement. However, `'static` is a much harder requirement to get rid of.
+There's a price to pay for that convenience; any `Future` that `Task` is meant to execute must be `'static` and possibly `'Send`. For the latter, it's only a requirement if it can be scheduled in different threads. This can be prevented by using constructs like `tokio::task::LocalSet`; although it can be a bit unwieldy, it will get rid of the `'Send` requirement. However, `'static` is a much harder requirement to get rid of.
 
-`'static` is a requirement because the spawned `Future` can be run at any later time, even outliving the scope of the block that originally spawned it. There are two ways to meet this requirement and have a mutable state: either by using a structure with internal mutability to store state, or by having single ownership of the different pieces of state in different tasks and coordinating between them using channels.
+`'static` is a requirement because the spawned `Future` can be run at any later time, even outliving the scope of the block that originally spawned it. There are two ways to meet this requirement and have a mutable state: either by using a structure with internal mutability to store state or by having single ownership of the different pieces of state in different tasks and coordinating between them using channels.
 
-Another option could be to stop using `spawn` altogether and instead try to run all the futures in a single task. To achieve this there are functions available like `futures::future::select`, `futures::future::select_all`, or `tokio::select`, which indeed don't require `'static`. Still, the `Future`s are themselves multiple units of work that exist at the same time; they can't share `&mut` references to the state. For that, again, you need structures with internal mutation.
+Another option could be to stop using `spawn` altogether and instead try to run all the futures in a single task. To achieve this, there are functions available like `futures::future::select`, `futures::future::select_all`, or `tokio::select`, which indeed don't require `'static`. Still, the `Future`s are themselves multiple units of work that exist at the same time; they can't share `&mut` references to the state. For that, again, you need structures with internal mutation.
 
 However, if we could segregate the IO futures from the state mutation, we could potentially have futures with no references to the shared state and a common block for handling the IO event for the future. That's the idea behind the reactor pattern.
 
@@ -1115,10 +1115,36 @@ But there's an approach that can lift these limitations.
 
 #### Hand-rolled future
 
-Instead of merging all futures together and waiting for any of them to be ready, we can poll them one by one, see which are ready, and react immediately. As we poll each future, we register their waker in the background, and any event that wakes the waker will cause us to poll every future again. 
+Behind the scenes, when we call `race` among the futures and `.await` the result, each of the futures that makes up our race are polled sequentially. Then the first one to return `Ready`, something like this in pseudocode:
 
-Let's begin at how the `Socket` implementation will look here. We can't split the IO no longer, as the splitted, version don't expose a convinent `poll` function for writing and reading.
+```rs
+fn race(self: Pin<&mut self>, ctx: Context) -> Poll<Result<T>> {
+    if Poll::Ready(result) = self.fut1.poll(ctx) {
+        return result;
+    }
 
+    if Poll::Ready(result) = self.fut2.poll(ctx) {
+        return result;
+    }
+
+    <...>
+
+
+    if Poll::Ready(result) = self.futn.poll(ctx) {
+        return result;
+    }
+}
+```
+
+If, instead of relying on library functions and the compiler to do it for us, we were to manually write this polling function, we could handle the result inline instead of returning it. Lifting the limitation of having a homogeneous return type.
+
+Furthermore, in the place where you call `poll`, you have the full context of the future, which means you can handle errors without artificially additional contexts to the errors within the function.
+
+Finally, the reason you can't pass shared mutable state to the futures that compose a race is that the mutable references passed as parameters will be held as long as the race exists so that it can be polled at a later time. If we manually call `poll` for the futures instead, we can pass in mutable references, which will be dropped as soon as the call returns.
+
+So, let's do exactly this: instead of having a single place where we wait for IO events to happen and react to them, we will register our waker into all these IO conditions, e.g., a packet arrives or a new connection is made, and when that event happens, we will poll the state of all our IO to see what happened. Finally, updating the state accordingly.
+
+Starting by updating the `Socket` abstraction. We can no longer split the `Socket` into reader and writer, as Tokio's version of the `Writter` and `Reader` doesn't provide a convenient method to manually poll them. This doesn't matter, since manually polling only borrows `self` when the poll function is called, so we can call two different polling methods in the same polling iteration on the same struct.
 
 ```rs
 struct Socket {
@@ -1180,6 +1206,9 @@ impl Socket {
         loop {
             ready!(self.stream.poll_read_ready(cx))?;
             match self.stream.try_read_buf(&mut self.read_buffer) {
+                Ok(0) => {
+                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset)));
+                }
                 Ok(_) => {}
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
                     continue;
@@ -1195,17 +1224,48 @@ impl Socket {
 }
 ```
 
-If you take a careful look at this, it's very similar to the previous version. `poll_read` tries to read from the `TcpStream` if there are bytes available it'll return a reference to them. Otherwise, it'll have its waker registered and return pending.
+The functions for this abstraction are very similar to the previous version, but instead of using `async/await` we use `poll` directly. However, there are some peculiarities that are worth going over. `poll_read` loops until a `poll_read_ready` returns pending,  there's an error or there's some new data. `poll_read_ready` allows subscribes the waker - stored within the `Context` - to be woken up when the socket is ready for a new read, i.e. when there's a new packet in the socket, if it returns pending, otherwise we're currently ready to read a packet. Next step, we do that, but there's a possibility that the socket became unavailable since the call to `poll_read_ready`, so if `try_read_buf` would block, we keep looping until `poll_read_ready` return pending or we actually read some data. After that we return either the error or the current buffer.
 
-`poll_send` is a bit more complicated, just because I wanted to keep the zero-copy from the latest version. First, if there's nothing to write it saves the waker so that when there's something to write we can be polled again. Then, if there's something to write, we check if the socket is ready for writing, otherwise we register the waker and return pending. If we manage to write, we update the buffers.
+We can't simply return a parsed message here, since this could unfairly make a single socket keep looping without yielding to the executor. So we'll approach parsing slightly differently. It'll be part of our main polling loop.
 
-Notice in both these functions we check for readiness, then we try to read or write, and normally you would handle explicitly the case of `WouldBlock`. In this case we assume there're no OS errors, so it must be a `WouldBlock`, then we need to re-register as the try_read/try_write doesn't do that for us, that's why we `continue`. 
+`poll_send` is similar, we have a queue of packets to be sent, and we try to write them one by one. We use the `Bytes` implementation of `advance` to keep track of what byte goes next. We never try to do more than one write for the same fairness reasons. `poll_send` also saves the `waker` if the buffer queue is empty, this allows us to wake it up in the `send` function.
 
-Lastly, `send` is pretty simple, we enqueue the buffer for writing and if there was a waker registered by `poll_send` previously, we wake it up, so that `poll_send` can be called again.
+In both of these functions, `poll_send` and `poll_read`, we can see the biggest drawbacks of manually polling. For one, in the previous version, the `Race` implementation took care of fairness for us; now we have to be very careful about it. On the flip side, now we have complete control over how fairness is implemented and its cost — which [can potentially be non-zero](https://docs.rs/tokio/latest/tokio/macro.select.html#fairness).
 
-With this in place we will add this function to the server.
+The second, and perhaps bigger, drawback is that we need to be very careful about the waker. Take a look at this implementation of `poll_read`:
+
+<!-- TODO: mark bad line -->
+```rs,linenos
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<&mut BytesMut>> {
+        loop {
+            ready!(self.stream.poll_read_ready(cx))?;
+            match self.stream.try_read_buf(&mut self.read_buffer) {
+                Ok(0) => {
+                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset)));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    return Poll::Pending;
+                }
+                Err(e) => {
+                    return Poll::Ready(Err(e));
+                }
+            };
+
+            return Poll::Ready(Ok(&mut self.read_buffer));
+        }
+    }
+```
+
+It looks innocens, but as soon as `WouldBlock` is returned by the socket, this can potentially be stuck forever. Since we don't call `continue` and register our `waker` on a pending `poll_read_ready`, a new packet on this socket won't wake the `waker` and therefore won't cause the caller to call `poll_read` again.
+
+
+In this case it might seem obvious, but we will see a more subtle case below.
+
+Next, we will add the `poll_next` function to the `Server`; this will be the main polling loop. 
 
 ```rs
+impl Server {
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         if let Poll::Ready(Ok((connection, _))) = self.listener.poll_accept(cx) {
             let mut socket = Socket::new(connection);
@@ -1251,15 +1311,20 @@ With this in place we will add this function to the server.
 
         Poll::Pending
     }
+}
 ```
 
-First, we check if listener has a new socket, in case there's we send the id to the socket and push it into our list of sockets. Then for each socket, we advance their internal send queue. Finally, for each socket, we try to read a message, if there's a complete message we enqueue it to the corresponding destination socket.
+Each time `poll_next` is called, check if any of the futures are ready, and advance the state accordingly. We also make sure to schedule ourselves to be polled next time any future is ready. `poll_next` always returns `Pending` since we want to keep handling new messages forever, so this is done so the executor keeps scheduling us whenever the passed waker is awakened.
 
-This is no different from what we've been doing before, the only difference is that now instead of the executor polling each future for us we're doing it manually.
+First thing to notice in this function are the calls to `cx.waker().wake_by_ref()`. It might seem a bit strange at first that we are waking ourselves up from the loop itself, this is however done to simplify the looping and fairness logic. When we call `cx.waker().wake_by_ref()`, the executor will immediately schedule us next in queue as soon as `Poll::Pending` is returned.
 
-There's some special care taken here, for one, there's fairness by always polling every future in every call to `poll_next`. This way, no particular socket can keep generating readiness events and prevent other future from advancing. Also, either a future returns pending after we stop polling it or we call `cx.waker().wake_by_ref()` so that we are immediately polled again, otherwise there's a chance the future is ready again and we are never awaken. 
+The function first checks for new connections; if there's one, it accepts it and then schedules itself to be re-awakened. We need to be very careful to reschedule the function again if `poll_accept` returns a new connection. Otherwise, once `poll_next` returns `Poll::Pending`, it won't be scheduled again in case of another new connection. Since a call to `poll_accept` that returns `Poll::Ready` doesn't schedule the waker to be woken up again. Potentially leaving this function to sleep forever if no other wake condition is triggered.
 
-Finally, to expose a nice async interface we use `poll_fn`.
+Then, we advance all sockets with pending packets by using `poll_send`. Notice here that all sockets are polled within each run of `poll_next`, and each `poll_send` does at most a single send operation. Both of these facts combined ensure fairness; otherwise, a single socket could take all CPU time, preventing all packets for other sockets from being sent, greatly diminishing throughput. And, since a socket that has successfully sent a packet doesn't schedule its waker for wake-up, we need to call `cx.waker().wake_by_ref()` so that `poll_next` is called again after returning pending, and that same socket can keep advancing on the next packet on its queue or be scheduled for wake-up when it's ready to do so. 
+
+Finally, we go through each socket and handle either a new packet or an error; here we see that we can handle errors in place without additional context. Then we make sure to forward the packet, if it's ready. Similar care has been taken with fairness and rescheduling as before. It can be very easy to miss the `cx.waker().wake_by_ref()` here. Failing to call that, in case of a partial message, there's nothing to wake the waker on a new packet arrival for that same socket, potentially making `poll_next` hang forever.
+
+And those are all the blocks of `poll_next`; finally, to expose a nice async interface, we use `poll_fn`.
 
 ```rs
     async fn handle_connections(&mut self) {
@@ -1267,15 +1332,55 @@ Finally, to expose a nice async interface we use `poll_fn`.
     }
 ```
 
-And there we have it; we're manually polling the futures. If we were handling errors, `poll_send` could surface it directly as `Poll<io::Result<()>>`, for example. And then in the main loop we can handle it by doing `self.connection.remove[dest]`[^6]. There's also no need to homogenize the return types from the futures, as we handle them separately.
+And there we have it; we're manually polling the futures. This has allowed us to handle errors in place and use a single task to multiplex all futures without needing combinators or adaptors. Additionally, if for optimization purposes, we wanted to share state between the futures, we could do it. For example, imagine sharing a single buffer between all sockets; we could modify `poll_read` like this:
+
+```rs
+    fn poll_read(&mut self, cx: &mut Context<'_>, buffer: &mut BytesMut) -> Poll<io::Result<&mut BytesMut>> {
+        loop {
+            ready!(self.stream.poll_read_ready(cx))?;
+            match self.stream.try_read_buf(buffer) {
+                Ok(0) => {
+                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset)));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => {
+                    return Poll::Ready(Err(e));
+                }
+            };
+
+            return Poll::Ready(Ok(buffer));
+        }
+    }
+```
+
+and then call it like this:
+
+```rs
+let buffer = BytesMut::new();
+for s in socket {
+    s.poll_ready(cx, buffer);
+}
+
+state.new_packets(buffer);
+```
+
+With a non-boundary-preserving protocol, such as TCP, this is very difficult to achieve, as we need an ancillary structure that preserves the boundaries. This can still be very useful with UDP or other protocols.
+
+The price to pay for all this convenience is two-fold:
+
+* Potentially having a bug where on some code branch your function is not rescheduled to be awakened on a new event.
+* Carefully manage fairness manually.
+
+With this in mind, let's move on to discuss the trade-offs.
 
 ## Picking a pattern
 
 ### Multitask vs Single task
 
-We've worked through these patterns and hopefully demonstrated a bit of their tradeoffs. Now let's expand on that to help you pick which one you should use in your application.
-
-This isn't a pick-one-or-the-other situation. You can mix and match; you can lock on a synchronous `Mutex` anywhere and race with an asynchronous one, although it doesn't expose a `poll` API, so you can't trivially use it if you're hand-rolling your own polling logic. You can always use a channel on a task that's polling on multiple futures or as part of a race; this way you can have more than one managing multiple futures with their own internal state and yet have them communicate. 
+This isn't, neccesarily, a pick-one-or-the-other situation. You can mix and match; you can lock on a synchronous `Mutex` anywhere and race with an asynchronous one, although it doesn't expose a `poll` API, so you can't trivially use it if you're hand-rolling your own polling logic. You can always use a channel on a task that's polling on multiple futures or as part of a race; this way you can have more than one managing multiple futures with their own internal state and yet have them communicate. 
 
 Even so, you need to consider the trade-offs of these concurrency patterns to pick which one to use.
 
@@ -1293,7 +1398,7 @@ In the end, it comes down to a choice of either manually polling your futures, o
 
 So, in conclusion, if you have multiple futures that require access to shared mutable state, try to keep the polling within a single task, only go to multiple task if the benchmarks hint at improvements. If the number of IO streams is small you can use combinators and wrappers to listen to the events concurrently, but as soon as it gets verbose or hard to debug you should try manually polling those events.
 
-## Sans-IO
+## A note on sans-IO
 
 Sans-IO is a model for network protocol, where you implement them in an IO-agnostic way, as a state machine that's evolved by outside events.
 
