@@ -25,25 +25,17 @@ This post is specifically about sharing mutable state in IO-bound applications. 
 
 The most common way to achieve concurrency in an async runtime is to spawn new `Task`s to handle IO events. `Task` is a primitive provided by async runtimes that represents a unit of work. As IO events unblock this unit of work, it can then be scheduled on the same thread or another to run concurrently with other `Task`s.
 
-There's a price to pay for that convenience; any `Future` that `Task` is meant to execute must be `'static` and possibly `'Send`. For the latter, it's only a requirement if it can be scheduled in different threads. This can be prevented by using constructs like `tokio::task::LocalSet`; although it can be a bit unwieldy, it will get rid of the `'Send` requirement. However, `'static` is a much harder requirement to get rid of.
+There's a price to pay for that convenience; any `Future` that `Task` is meant to execute must be `'static` and possibly `'Send`. For the latter, it's only a requirement if the task can be scheduled in different threads. This can be prevented by using constructs like `tokio::task::LocalSet`; although it can be a bit unwieldy, it will get rid of the `'Send` requirement. However, `'static` is a much harder requirement to get rid of.
 
 `'static` is a requirement because the spawned `Future` can be run at any later time, even outliving the scope of the block that originally spawned it. There are two ways to meet this requirement and have a mutable state: either by using a structure with internal mutability to store state or by having single ownership of the different pieces of state in different tasks and coordinating between them using channels.
 
-Another option could be to stop using `spawn` altogether and instead try to run all the futures in a single task. To achieve this, there are functions available like `futures::future::select`, `futures::future::select_all`, or `tokio::select`, which indeed don't require `'static`. Still, the `Future`s are themselves multiple units of work that exist at the same time; they can't share `&mut` references to the state. For that, again, you need structures with internal mutation.
+Another option is to stop using `spawn` altogether and instead try to run all the futures in a single task. To achieve this, there are functions available like `futures::future::select`, `futures::future::select_all`, or `tokio::select`, which don't require `'static`. Still, the `Future`s are themselves multiple units of work that exist at the same time; they can't share `&mut` references to the state. For that, again, you need structures with internal mutation.
 
-However, if we could segregate the IO futures from the state mutation, we could potentially have futures with no references to the shared state and a common block for handling the IO event for the future. That's the idea behind the reactor pattern.
+However, if we segregate the IO futures from state mutation, we could potentially have futures with no references to the shared state and a common block for handling the IO event for the future. On the common path, where no IO occurs, we can handle the IO event mutating state, directly holding an `&mut` reference. Yet, there's another approach that allows us to share mutable state between the IO structures. 
 
-The idea is you can wait for any IO event to happen, and when an event occurs, you get a descriptor of the event and can just handle it, having an `&mut` reference to state. But this can be taken a step further.
+Normally, calling `.await` in an `async` function schedules a `Waker` associated with a task to be woken at some point in the future. The compiler automatically keeps track of the state of the future by generating an enum that represents the `await` point and keeps the state stored. Noticing that this coupling only exists so that the task can resume execution at the same point, we could structure our code so that each time the task is woken up, we try to sequentially advance work on all our IO and poll all our IO for new events. That way, all IO can also share references to mutable state. It's okay if this is a bit confusing right now; it will become quite clearer once we move into the concrete examples.
 
-Normally, calling `.await` in an `async` function schedules a `Waker` associated with a task to be woken at some point in the future. The compiler automatically keeps track of the state of the future by generating an enum that represents the `await` point and keeps the state stored. Notice that this coupling only exists so that the task can resume execution at the same point; we could structure our code so that each time the task is woken, we try to sequentially advance work on all our IO and poll all our IO for new events. That way, all IO can also share references to mutable state. It's okay if this is a bit confusing right now; it will become quite clearer once we move into the concrete examples.
-
-This is another approach to the reactor pattern with its own trade-offs that we will also discuss.
-
-The first version of the reactor pattern I mentioned probably rings familiar to anyone who has been working with async Rust code. A loop that selects between multiple futures is a common pattern, and that's indeed the reactor pattern in use, but the key is that we can architect the whole program around this without spawning any task. 
-
-In fact, the reactor pattern is what `tokio` and most other runtimes use under the hood to implement their execution engine. But we can go beyond that and use the pattern even in application-level contexts where you have an async runtime.
-
-To show this, I introduce a simple example that we will evolve with different modeling techniques for I/O concurrent code. It will give us some context to discuss the benefits and drawbacks of each of these patterns.
+Now, I'll introduce a simple example that we will evolve with different modeling techniques for I/O concurrent code. It will give us some context to discuss the benefits and drawbacks of each of these patterns.
 
 ## The toy problem
 
@@ -1374,13 +1366,15 @@ The price to pay for all this convenience is two-fold:
 * Potentially having a bug where on some code branch your function is not rescheduled to be awakened on a new event.
 * Carefully manage fairness manually.
 
+Furthermore, Tokio keeps track of what IO events are related to what futures. >Limiting the polling only to the futures subscribed to the IO-events that causes a wake-up. Normally, polling is very cheap on a future that does no work and if it does work it makes sense to poll it anyway. But it's a cost to keep in mind.
+
 With this in mind, let's move on to discuss the trade-offs.
 
 ## Picking a pattern
 
 ### Multitask vs Single task
 
-This isn't, neccesarily, a pick-one-or-the-other situation. You can mix and match; you can lock on a synchronous `Mutex` anywhere and race with an asynchronous one, although it doesn't expose a `poll` API, so you can't trivially use it if you're hand-rolling your own polling logic. You can always use a channel on a task that's polling on multiple futures or as part of a race; this way you can have more than one managing multiple futures with their own internal state and yet have them communicate. 
+This isn't, necessarily, a pick-one-or-the-other situation. You can mix and match; you can lock on a synchronous `Mutex` anywhere and race with an asynchronous one, although it doesn't expose a `poll` API, so you can't trivially use it if you're hand-rolling your own polling logic. You can always use a channel on a task that's polling on multiple futures or as part of a race; this way you can have more than one managing multiple futures with their own internal state and yet have them communicate. 
 
 Even so, you need to consider the trade-offs of these concurrency patterns to pick which one to use.
 
