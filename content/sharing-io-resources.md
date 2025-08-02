@@ -12,11 +12,11 @@ categories = ["rust", "patterns"]
 toc = true
 +++
 
+Using multiple tasks is probably the most common way to achieve non-sequential work in Rust. Each task can wait for a different IO event, and the async runtime will schedule the tasks as soon as the IO events occur. This provides for a simple and convenient way to non-blockingly wait for these IO events to happen and achieve concurrency. But sharing mutable state among the tasks can become quite complex.
 
-Sharing mutable state in concurrent code is difficult, whether in Rust or any other language. To achieve this, normally multiple tasks are used, the Runtime multiplex them among available threads, and state is shared among them using either channels or Mutexes. I want to propose an alternative, multiplexing all futures in a single task, and thus discarding the need for any kind of synchronization primitive. 
+This is usually done using either `Mutex`es or channels. The former is very hard to get right; the latter can get out of hand very quickly. As an alternative, instead of having multiple tasks and sharing state among them, I want to propose defaulting to a single task and removing the problem of sharing mutable state, while still considering its trade-offs and being able to slowly scale to the other methods as they're needed. 
 
-In this article I'll present a simple example of a network application, progressively applying the different concurrency patterns, mutexes, channels, and two approaches on a single task to consider their trade-offs. Arguing that in a lot of cases approaching concurrency with a single task can simplify async applications.
-
+In this article I'll present a simple example of a network application, to which I will progressively apply these different patterns to mutably share state, mutexes, channels, and two approaches on a single task to consider these trade-offs. So that we are better placed to make an informed decision on these approaches and make a case for single tasks.
 <!-- more -->
 
 ## Motivation
@@ -1136,7 +1136,7 @@ Finally, the reason you can't pass shared mutable state to the futures that comp
 
 So, let's do exactly this: instead of having a single place where we wait for IO events to happen and react to them, we will register our waker into all these IO conditions, e.g., a packet arrives or a new connection is made, and when that event happens, we will poll the state of all our IO to see what happened. Finally, updating the state accordingly.
 
-Starting by updating the `Socket` abstraction. We can no longer split the `Socket` into reader and writer, as Tokio's version of the `Writter` and `Reader` doesn't provide a convenient method to manually poll them. This doesn't matter, since manually polling only borrows `self` when the poll function is called, so we can call two different polling methods in the same polling iteration on the same struct.
+Starting by updating the `Socket` abstraction. We can no longer split the `Socket` into reader and writer, as Tokio's version of the `Writer` and `Reader` doesn't provide a convenient method to manually poll them. This doesn't matter, since manually polling only borrows `self` when the poll function is called, so we can call two different polling methods in the same polling iteration on the same struct.
 
 ```rs
 struct Socket {
@@ -1249,7 +1249,7 @@ The second, and perhaps bigger, drawback is that we need to be very careful abou
     }
 ```
 
-It looks innocens, but as soon as `WouldBlock` is returned by the socket, this can potentially be stuck forever. Since we don't call `continue` and register our `waker` on a pending `poll_read_ready`, a new packet on this socket won't wake the `waker` and therefore won't cause the caller to call `poll_read` again.
+It looks innocent, but as soon as `WouldBlock` is returned by the socket, this can potentially be stuck forever. Since we don't call `continue` and register our `waker` on a pending `poll_read_ready`, a new packet on this socket won't wake the `waker` and therefore won't cause the caller to call `poll_read` again.
 
 
 In this case it might seem obvious, but we will see a more subtle case below.
