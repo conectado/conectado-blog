@@ -1361,30 +1361,38 @@ state.new_packets(buffer);
 
 With a non-boundary-preserving protocol, such as TCP, this is very difficult to achieve, as we need an ancillary structure that preserves the boundaries. This can still be very useful with UDP or other protocols.
 
-The price to pay for all this convenience is two-fold:
+The price to pay for this convenience is two-fold:
 
 * Potentially having a bug where on some code branch your function is not rescheduled to be awakened on a new event.
 * Carefully manage fairness manually.
 
-Furthermore, Tokio keeps track of what IO events are related to what futures. >Limiting the polling only to the futures subscribed to the IO-events that causes a wake-up. Normally, polling is very cheap on a future that does no work and if it does work it makes sense to poll it anyway. But it's a cost to keep in mind.
-
-With this in mind, let's move on to discuss the trade-offs.
+But there we have it; we implemented the same server protocol by hand-rolling the polling logic. Now that we've gone through all these patterns, let's discuss which to choose when.
 
 ## Picking a pattern
 
+This isn't a pick-one-or-the-other situation. You can mix and match; you can lock on a synchronous `Mutex` anywhere and race with an asynchronous one. You can always use a channel on a task that's polling on multiple futures or as part of a race; this way you can have more than one managing multiple futures with their own internal state and yet have them communicate. 
+
+This means that, considering the trade-offs between these patterns, you could note that, after benchmarking, a single IO event is firing off so often that it's a performance issue, forcing its handling on the same thread as the others. Then you can have a separate task exclusively for that event, communicating back with a channel with the main looping task that handles state. 
+
+Then let's compare these trade-offs and make some prescriptions.
+
 ### Multitask vs Single task
 
-This isn't, necessarily, a pick-one-or-the-other situation. You can mix and match; you can lock on a synchronous `Mutex` anywhere and race with an asynchronous one, although it doesn't expose a `poll` API, so you can't trivially use it if you're hand-rolling your own polling logic. You can always use a channel on a task that's polling on multiple futures or as part of a race; this way you can have more than one managing multiple futures with their own internal state and yet have them communicate. 
+There's generally not much of a need to use a `Mutex`, considering how easy it is to mess it up. In practice, the cases where you want a `Mutex` are limited to either very constrained environments on performance or memory; or if you don't have an async runtime and need to share mutable access to some state between threads.
 
-Even so, you need to consider the trade-offs of these concurrency patterns to pick which one to use.
+Barring those constraints, we can either multiplex all futures in a single task or use a task per I/O and communicate state updates through channels. For most cases **it's better to use a single task**.
 
-There's generally not much of a need to use a `Mutex`, considering how easy it is to mess it up. In practice, the cases where you want a mutex are limited to either very constrained environments on performance or memory; or if you don't have an async runtime and need to share mutable access to some state between threads.
+With a single task it can be a bit confusing having a function such as `send` that explicitly buffers messages to later be polled as part of your main loop. But the ergonomics lost are worth having direct mutable access to state instead of managing channels and tasks. It enables easier and more granular control over back-pressure, error handling becomes obvious, and there are no traceability problems over values, which makes both debugging and static analysis way easier.
 
-Barring those constraints, we can either multiplex all futures in a single task, or use a task per I/O and communicate state updates through channels. For most cases it's better to use a single task, the ergonomics lost from having to explicitly buffer the state of the future are worth having direct mutable access to state instead of managing channels and tasks. After all, functionally, the channel is just a buffering layer. 
+Furthermore, each individual task requires managing; an orphaned task may potentially represent leaked resources. And there's no back pressure when new tasks are spawned, potentially leading to an unbounded usage of resources.
 
-The big reason for sacrificing the ergonomics of having a single task with shared access to mutable state, is to have the different futures scheduled in parallel in multiple threads. <This is important if the synchronous code handling events or the sequential polling of IO is a bottleneck for the throughput of IO events produced. So if more events are produced than a single thread can handle, multiple tasks could be necessary.> This is however, a very complicated case; you lose data locality and the channels blocking and allocations can also negatively impact performance, so if you need to go down this route don't think just spawning new tasks will magically solve your performance issues.
+The main reason to sacrifice the convenience of having a single task with shared access to mutable state is to have the different futures scheduled in parallel in multiple threads. When events are fired off so quickly that the time spent handling each of these events prevents handling the next one, using a single thread becomes a problem. In this case, having multiple tasks that can be scheduled in different threads becomes necessary for performance. This is, however, a very complicated case; you lose data locality, bounded channels' back-pressure might unexpectedly block unrelated tasks if not carefully managed, and allocations can also negatively impact performance. So if you need to go down this route, be very careful with benchmarks and make sure that back pressure is applied correctly.
+
+Another advantage of using multiple tasks, is that async runtimes like Tokio keep track of what IO events are related to what tasks. Limiting the polling only to the futures subscribed to the IO-events that cause a wake-up. Normally, polling is very cheap on a future that does no work, and if it does work, it makes sense to poll it anyway. But it's another cost to consider when benchmarking a single task.
 
 Of course, if your tasks don't need mutable access to the same state it's a good idea to use them to represent separated units of work and might be more performant. 
+
+If multiple tasks are needed, I recommend using a structured approach such as actors.[^2][^8][^9]
 
 ### Hand-rolled future vs Combinators
 
@@ -1415,3 +1423,5 @@ To learn more about Sans-IO you could read...
 [^4]: https://github.com/yoshuawuyts/futures-concurrency/issues/85
 [^5]: https://github.com/yoshuawuyts/futures-concurrency/pull/104
 [^6]: Of course there should be extra care to no longer use the index into the connections like we were before, a Map ofIDs to sockets would work much better.
+[^7]: https://blog.yoshuawuyts.com/tree-structured-concurrency/
+[^8]: https://blog.yoshuawuyts.com/replacing-tasks-with-actors/
